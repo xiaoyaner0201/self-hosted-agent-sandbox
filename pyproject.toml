@@ -1,0 +1,23 @@
+[project]
+name = "self-hosted-agent-sandbox"
+version = "0.1.0"
+description = "Disposable gVisor sandboxes for AI coding agents on your own k3s nodes (kubernetes-sigs/agent-sandbox)"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+dependencies = []
+authors = [{ name = "xiaoyaner0201" }]
+keywords = ["sandbox", "gvisor", "k3s", "kubernetes", "ai-agents", "self-hosted"]
+
+[project.urls]
+Homepage = "https://github.com/xiaoyaner0201/self-hosted-agent-sandbox"
+
+[project.scripts]
+sbx = "agent_sandbox.cli:main"
+
+[build-system]
+requires = ["hatchling>=1.26,<2"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agent_sandbox"]

@@ -1,0 +1,31 @@
+# Minimal generic pool (python image). For a pool that mirrors your agent host image use render-pool.py.
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata: {name: agent-4g, namespace: sbx}
+spec:
+  networkPolicyManagement: Unmanaged
+  podTemplate:
+    spec:
+      runtimeClassName: gvisor
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      containers:  # add PIP_INDEX_URL / NPM_CONFIG_REGISTRY / GOPROXY env for your mirrors
+      - name: main
+        image: python:3.12-slim
+        command: ["sleep", "infinity"]
+        workingDir: /workspace
+        env:
+        - {name: JAVA_TOOL_OPTIONS, value: "-XX:MaxRAMPercentage=50.0 -XX:MaxMetaspaceSize=384m -XX:ReservedCodeCacheSize=128m -XX:MaxDirectMemorySize=256m -Xss512k -XX:+ExitOnOutOfMemoryError"}
+        - {name: PIP_DISABLE_PIP_VERSION_CHECK, value: "1"}
+        resources:
+          requests: {cpu: 250m, memory: 512Mi}
+          limits: {cpu: "2", memory: 3584Mi}
+        volumeMounts: [{name: ws, mountPath: /workspace}]
+      volumes: [{name: ws, emptyDir: {sizeLimit: 10Gi}}]
+---
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxWarmPool
+metadata: {name: agent-4g, namespace: sbx}
+spec:
+  replicas: 2
+  sandboxTemplateRef: {name: agent-4g}

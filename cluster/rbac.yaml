@@ -1,0 +1,33 @@
+# Least-privilege identity for the agent host: claim sandboxes and exec into them, nothing else.
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: agent-sandbox, namespace: sbx}
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: agent-sandbox, namespace: sbx}
+rules:
+- apiGroups: ["extensions.agents.x-k8s.io"]
+  resources: ["sandboxclaims"]
+  verbs: ["get", "list", "watch", "create", "patch", "delete"]
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get"]
+- apiGroups: [""]
+  resources: ["pods/exec"]
+  verbs: ["create", "get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: agent-sandbox, namespace: sbx}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: agent-sandbox}
+subjects: [{kind: ServiceAccount, name: agent-sandbox, namespace: sbx}]
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: agent-sandbox-token
+  namespace: sbx
+  annotations: {kubernetes.io/service-account.name: agent-sandbox}
+type: kubernetes.io/service-account-token
