@@ -146,14 +146,16 @@ for k in ("credential.helper", "http.extraheader", "http.proxy", "url.https://x/
           "alias.release", "sendemail.smtppass", "github.token", "gpg.program", "credential.https://x.helper",
           "remote.origin.url", "branch.main.remote"):
     assert not m._gitconfig_key_forwarded(k), k
-for k in ("core.repositoryformatversion", "core.bare", "extensions.objectformat", "remote.origin.url",
+for k in ("core.repositoryformatversion", "core.bare", "extensions.objectformat", "extensions.worktreeconfig", "remote.origin.url",
           "remote.origin.fetch", "remote.a.b.url", "branch.main.merge", "branch.feat/x.remote", "submodule.lib.url"):
     assert m._gitconfig_key_forwarded(k, repo=True), k
 for k in ("remote.origin.uploadpack", "remote.origin.receivepack", "remote.origin.proxy", "remote.origin.vcs",
           "http.https://x.extraheader", "core.sshcommand", "core.hookspath", "core.fsmonitor", "alias.x",
-          "credential.helper", "filter.lfs.process", "diff.x.textconv", "branch.main.description"):
+          "credential.helper", "filter.lfs.process", "diff.x.textconv", "branch.main.description",
+          "extensions.anything", "extensions.partialclone"):
     assert not m._gitconfig_key_forwarded(k, repo=True), k
 assert m._is_repo_gitconfig("/w/.git/config") and m._is_repo_gitconfig("/w/.git/modules/lib/config")
+assert m._is_repo_gitconfig("/w/.git/config.worktree") and m._is_repo_gitconfig("/w/.git/worktrees/x/config.worktree")
 assert not m._is_repo_gitconfig("/w/config") and not m._is_repo_gitconfig("/w/.git/hooks/x")
 print("gitconfig allowlist ok")
 # safe_makedirs + symlink parent

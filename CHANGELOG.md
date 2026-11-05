@@ -9,7 +9,7 @@
 - A variable forwarded earlier in the session and then dropped (from the host or the allowlist)
   is unset in the sandbox.
 - Git config is an exact key allowlist: identity and everyday settings from `~/.gitconfig`; for
-  each repository's `.git/config` in the code dirs also format, branches, remote URLs and fetch
+  each repository's `.git/config` and `config.worktree` in the code dirs also format, branches, remote URLs and fetch
   refspecs. No aliases, `core.sshCommand`, `core.askpass`, hooks paths, helpers, includes,
   `http.*`, `url.*`, nor values with `user:pass@`. A reused sandbox's copy is always replaced.
 - Tests: `core_unit.py` and `route_table.py` cover the allowlists with a host API key, credential

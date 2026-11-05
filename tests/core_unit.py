@@ -150,6 +150,15 @@ try:
     assert sent == ["rm -f ~/.gitconfig"], sent
     os.unlink(gc); sent.clear(); s8._push_gitconfig()
     assert sent == ["rm -f ~/.gitconfig"], sent
+    # host config cannot be parsed (git missing, timeout, ...): still cleared, nothing copied
+    open(gc, "w").write("[user]\n\tname = Dev\n"); sent.clear()
+    real_san = m._sanitized_gitconfig
+    m._sanitized_gitconfig = lambda *a, **k: (_ for _ in ()).throw(m.subprocess.TimeoutExpired("git", 10))
+    try:
+        s8._push_gitconfig()
+    finally:
+        m._sanitized_gitconfig = real_san
+    assert sent == ["rm -f ~/.gitconfig"], sent
 finally:
     os.environ["HOME"] = old_home
 print("gitconfig allowlist ok")
@@ -173,9 +182,24 @@ real_run = m.subprocess.run
 m.subprocess.run = lambda argv, *a, **k: fake_run(argv, **k) if argv == ["true"] else real_run(argv, *a, **k)
 try:
     gcfg, app = os.path.join(repo, ".git", "config"), os.path.join(repo, "app.cfg")
-    s9._tar_push([(gcfg, gcfg), (app, app)])
+    wt = os.path.join(repo, ".git", "config.worktree")
+    open(wt, "w").write(CREDS)
+    s9._tar_push([(gcfg, gcfg), (app, app), (wt, wt)])
+    # sanitizing fails: the sandbox gets an empty file, never the raw one
+    real_add = m.Sandbox._add_repo_gitconfig
+    m.Sandbox._add_repo_gitconfig = staticmethod(lambda *a: (_ for _ in ()).throw(OSError("git missing")))
+    try:
+        bad = os.path.join(repo, ".git", "modules", "x", "config"); os.makedirs(os.path.dirname(bad))
+        open(bad, "w").write(CREDS)
+        s9._tar_push([(bad, bad)])
+    finally:
+        m.Sandbox._add_repo_gitconfig = real_add
 finally:
     m.subprocess.run = real_run
+assert pushed[bad] == "", pushed[bad]
+wcfg = pushed[wt]
+for bad_s in ("ghp_", "helper", "extraheader", "sshcommand", "hookspath", "alias", "askpass"):
+    assert bad_s not in wcfg.lower(), (bad_s, wcfg)
 cfg = pushed[gcfg]
 assert "https://git.example/up.git" in cfg and "repositoryformatversion" in cfg and "merge = refs/heads/main" in cfg, cfg
 for bad in ("ghp_", "pw@", "helper", "extraheader", "sshcommand", "hookspath", "alias", "include", "askpass"):

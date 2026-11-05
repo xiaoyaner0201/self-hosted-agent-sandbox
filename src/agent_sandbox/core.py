@@ -12,7 +12,8 @@ What travels into the sandbox ("host" below = the machine the agent runs on):
 * Git config: an exact key allowlist (identity and everyday settings; no aliases, commands,
   helpers, http/url/include) of the host ~/.gitconfig, and of each repository's .git/config inside
   the code dirs (plus what git needs there: format, branches, remotes); values with user:pass@
-  are dropped. Other files in the code dirs are sent as they are.
+  are dropped; if sanitizing fails the sandbox gets an empty file. Other files in the code dirs,
+  sync paths and seed dirs are sent as they are.
 * Declared files/dirs (``sync_paths``): pushed at the SAME absolute path, change-checked before
   every command. The host copy is the source of truth; sandbox edits are never copied back.
 * Code (``code_dirs``; default = the task cwd when it is under /workspaces): pushed like declared
@@ -200,7 +201,8 @@ _GIT_SAFE_KEYS = frozenset({
 })
 # Additionally kept in a repository's own .git/config (needed for git to work in the sandbox).
 _GIT_REPO_KEYS = frozenset({"core.repositoryformatversion", "core.bare", "core.logallrefupdates",
-                            "core.worktree"})
+                            "core.worktree", "extensions.objectformat", "extensions.worktreeconfig",
+                            "extensions.refstorage"})
 _GIT_REPO_SUBKEYS = {"branch": {"remote", "merge", "rebase"}, "remote": {"url", "pushurl", "fetch"},
                      "submodule": {"url", "active", "path", "branch"}}
 
@@ -208,7 +210,7 @@ _GIT_REPO_SUBKEYS = {"branch": {"remote", "merge", "rebase"}, "remote": {"url", 
 def _gitconfig_key_forwarded(key: str, repo: bool = False) -> bool:
     """``key`` as printed by ``git config --list`` (section and name lower-cased)."""
     k = key.lower()
-    if k in _GIT_SAFE_KEYS or (repo and (k in _GIT_REPO_KEYS or k.startswith("extensions."))):
+    if k in _GIT_SAFE_KEYS or (repo and k in _GIT_REPO_KEYS):
         return True
     section, _, rest = key.partition(".")
     sub, _, name = rest.rpartition(".")
@@ -227,9 +229,10 @@ def _sanitized_gitconfig(src: str, repo: bool) -> list[tuple[str, str]]:
 
 
 def _is_repo_gitconfig(path: str) -> bool:
-    """A git repository's own config file (``.git/config``, ``.git/modules/<m>/config``)."""
+    """A git repository's own config file anywhere under a ``.git`` dir: ``config`` and
+    ``config.worktree`` of the repository, its submodules (``modules/``) and worktrees."""
     parts = Path(path).parts
-    return len(parts) >= 2 and parts[-1] == "config" and ".git" in parts[:-1]
+    return len(parts) >= 2 and parts[-1] in ("config", "config.worktree") and ".git" in parts[:-1]
 
 
 _TASK_PATH_RE = re.compile(r"/workspaces/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+/workdir")
@@ -515,7 +518,14 @@ class Sandbox:
             for host, remote in pairs:
                 try:
                     if _is_repo_gitconfig(host) and os.path.isfile(host):
-                        self._add_repo_gitconfig(tar, host, remote)
+                        try:
+                            self._add_repo_gitconfig(tar, host, remote)
+                        except (OSError, subprocess.SubprocessError) as e:
+                            # fail closed: an empty file replaces whatever the sandbox held
+                            logger.warning("agent-sandbox: %s sent empty, sanitizing failed: %s", host, e)
+                            info = tar.gettarinfo(host, arcname=remote.lstrip("/"))
+                            info.size = 0
+                            tar.addfile(info, io.BytesIO(b""))
                     else:
                         tar.add(host, arcname=remote.lstrip("/"), recursive=False)
                 except (OSError, subprocess.SubprocessError):
@@ -899,10 +909,11 @@ class Sandbox:
         src = os.path.expanduser("~/.gitconfig")
         try:
             pairs = _sanitized_gitconfig(src, repo=False) if os.path.isfile(src) else []
-            lines = [f"git config --global --add {shlex.quote(k)} {shlex.quote(v)}" for k, v in pairs]
-            self._exec_simple("; ".join(["rm -f ~/.gitconfig"] + lines))
-        except Exception as e:
-            logger.warning("agent-sandbox: gitconfig push failed: %s", e)
+        except Exception as e:  # fail closed: the sandbox copy is still cleared below
+            logger.warning("agent-sandbox: host gitconfig not read, sandbox gets none: %s", e)
+            pairs = []
+        lines = [f"git config --global --add {shlex.quote(k)} {shlex.quote(v)}" for k, v in pairs]
+        self._exec_simple("; ".join(["rm -f ~/.gitconfig"] + lines))
 
     def _reset_remote_dirs(self, dirs: list[str]) -> None:
         """host is the source of truth when a code dir is adopted: drop whatever a reused
