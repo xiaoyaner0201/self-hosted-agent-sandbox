@@ -143,7 +143,8 @@ Each arrow starts at the side that opens the connection.
 
 - Sandboxes run under **gVisor**, as a non-root uid, with no service-account token and no service links.
 - **Credentials stay on the host.** The sandbox runs and builds code; it gets no host variable you have not named in `AGENT_SANDBOX_FORWARD_ENV` (empty by default), and git network commands that need credentials run on the host.
-- The git config copied into the sandbox is an allowlist: the `user`, `core`, `init`, `pull`, `push` and `alias` sections, minus any key whose name mentions a token, password, secret, credential, key or proxy and any value with `user:pass@`. Credential helpers, includes, `http.*` and `url.*` never go in.
+- Git config reaches the sandbox through an exact key allowlist: from the host `~/.gitconfig` only identity and everyday settings (`user.name`, `user.email`, `init.defaultBranch`, `pull.rebase`, `push.default`, line-ending and file-mode options); from each repository's `.git/config` in the code dirs also what git needs there (format, branches, remote URLs and fetch refspecs). Aliases, `core.sshCommand`, `core.askpass`, hooks paths, credential helpers, includes, `http.*` and `url.*` never go in, and any value with `user:pass@` is dropped. On a reused sandbox the copy is replaced, never kept.
+- Other files in the code dirs and in the sync paths are sent as they are: keep tokens out of the working tree (no `.env` with real keys, no `.npmrc` with an auth token there).
 - Pull-back into `.git` is an allowlist (objects, refs, logs, `HEAD`, `index`, `packed-refs`, …). Config, hooks, gitfiles and everything else stay as the host has them, host-side git runs with `safe.bareRepository=explicit`, and writes through host symlinks that lead out of the code dirs are refused, so nothing built in the sandbox can plant a hook that a later host-side `git push` runs.
 - Package caches are per tenant, so one tenant cannot poison another tenant's cache.
 - The agent host's service account may only manage `sandboxclaims` and exec into pods in one namespace.
@@ -155,7 +156,7 @@ Each arrow starts at the side that opens the connection.
 ## 🧪 Tests
 
 - `tests/route_table.py` (fixed cases) and `tests/route_fuzz.py` (random commands run through real bash, asserting nothing is written outside the code dir) check host-command routing offline: `python tests/route_table.py`.
-- `tests/core_unit.py` checks error handling, streaming output, `release`, the variable allowlist (empty by default: a host API key does not reach the sandbox) and the git config allowlist offline with a fake `kubectl`.
+- `tests/core_unit.py` checks error handling, streaming output, `release`, the variable allowlist (empty by default: a host API key does not reach the sandbox; dropped names are unset) and the git config allowlists (host and repository) offline with a fake `kubectl`.
 - `tests/e2e.sh` drives the `sbx` CLI against a real cluster: gVisor, variable forwarding, pull-back of files and commits, host routing, claim reuse and release, exit codes.
 - Adapter repos carry their own acceptance suites (for Hermes: 26 + 15 end-to-end checks).
 

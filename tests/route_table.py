@@ -137,13 +137,24 @@ assert E._env_forwarded("BAR") and E._env_forwarded("NPM_CONFIG_REGISTRY")
 assert not E._env_forwarded("NPM_CONFIG_TOKEN") and not E._env_forwarded("FOO") and not E._env_forwarded("PATH")
 assert not E._env_forwarded("bad-name") and not E._env_forwarded("OPENAI_API_KEY")
 print("env allowlist ok")
-# gitconfig: section allowlist minus credential-looking key names
-for k in ("user.name", "user.email", "core.autocrlf", "init.defaultBranch", "pull.rebase", "push.default", "alias.co"):
-    assert m._gitconfig_key_forwarded(k), k
+# gitconfig: exact key allowlist; repository configs also keep what git needs to work
+for k in ("user.name", "user.email", "core.autocrlf", "init.defaultbranch", "pull.rebase", "push.default"):
+    assert m._gitconfig_key_forwarded(k) and m._gitconfig_key_forwarded(k, repo=True), k
 for k in ("credential.helper", "http.extraheader", "http.proxy", "url.https://x/.insteadof", "include.path",
-          "includeif.gitdir:~/w/.path", "user.signingkey", "user.token", "core.sshcommand.pass", "core.askpass",
-          "alias.gettoken", "core.gitproxy", "sendemail.smtppass", "github.token", "gpg.program"):
+          "includeif.gitdir:~/w/.path", "user.signingkey", "user.token", "core.askpass", "core.sshcommand",
+          "core.gitproxy", "core.hookspath", "core.fsmonitor", "core.pager", "core.editor", "alias.co",
+          "alias.release", "sendemail.smtppass", "github.token", "gpg.program", "credential.https://x.helper",
+          "remote.origin.url", "branch.main.remote"):
     assert not m._gitconfig_key_forwarded(k), k
+for k in ("core.repositoryformatversion", "core.bare", "extensions.objectformat", "remote.origin.url",
+          "remote.origin.fetch", "remote.a.b.url", "branch.main.merge", "branch.feat/x.remote", "submodule.lib.url"):
+    assert m._gitconfig_key_forwarded(k, repo=True), k
+for k in ("remote.origin.uploadpack", "remote.origin.receivepack", "remote.origin.proxy", "remote.origin.vcs",
+          "http.https://x.extraheader", "core.sshcommand", "core.hookspath", "core.fsmonitor", "alias.x",
+          "credential.helper", "filter.lfs.process", "diff.x.textconv", "branch.main.description"):
+    assert not m._gitconfig_key_forwarded(k, repo=True), k
+assert m._is_repo_gitconfig("/w/.git/config") and m._is_repo_gitconfig("/w/.git/modules/lib/config")
+assert not m._is_repo_gitconfig("/w/config") and not m._is_repo_gitconfig("/w/.git/hooks/x")
 print("gitconfig allowlist ok")
 # safe_makedirs + symlink parent
 d = os.path.realpath(tempfile.mkdtemp()); out = os.path.realpath(tempfile.mkdtemp())

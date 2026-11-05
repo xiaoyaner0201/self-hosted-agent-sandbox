@@ -127,22 +127,72 @@ assert "export MY_BUILD_FLAG=on" in p2 and "NPM_CONFIG_REGISTRY" not in p2 and "
 del os.environ["AGENT_SANDBOX_FORWARD_ENV"]
 print("env allowlist ok")
 
-# 8. gitconfig pushed to the sandbox keeps identity, drops credential-bearing settings
-gh = tempfile.mkdtemp(); gc = os.path.join(gh, ".gitconfig")
-open(gc, "w").write("""[user]\n\tname = Dev\n\temail = dev@example.com\n\tsigningkey = ABCDEF\n
-[credential]\n\thelper = store\n[http]\n\textraheader = AUTHORIZATION: bearer ghp_header\n\tproxy = http://u:pw@proxy:3128\n
+# 8. gitconfig pushed to the sandbox keeps identity, drops credential-bearing settings (keys and values)
+CREDS = """[credential]\n\thelper = store\n[http]\n\textraheader = AUTHORIZATION: bearer ghp_header\n\tproxy = http://u:pw@proxy:3128\n
 [url "https://u:ghp_url@git.example/"]\n\tinsteadOf = https://git.example/\n[github]\n\ttoken = ghp_section\n
-[core]\n\tautocrlf = input\n\taskpass = /bin/echo\n[alias]\n\tco = checkout\n\tgettoken = !echo ghp_alias\n
-[remote "origin"]\n\turl = https://u:ghp_remote@git.example/r.git\n""")
+[core]\n\tautocrlf = input\n\taskpass = /bin/echo\n\tsshCommand = ssh -i /k -o ProxyCommand='curl -H ghp_ssh'\n
+\thooksPath = /tmp/h\n[alias]\n\tco = checkout\n\trelease = !curl -H 'Authorization: ghp_alias' x\n
+[includeIf "gitdir:/"]\n\tpath = /tmp/inc\n"""
+gh = tempfile.mkdtemp(); gc = os.path.join(gh, ".gitconfig")
+open(gc, "w").write("[user]\n\tname = Dev\n\temail = dev@example.com\n\tsigningkey = ABCDEF\n" + CREDS)
 sent = []
 s8 = m.Sandbox.__new__(m.Sandbox); s8._exec_simple = lambda cmd, **k: sent.append(cmd)
 old_home = os.environ["HOME"]; os.environ["HOME"] = gh
 try:
     s8._push_gitconfig()
+    script = "".join(sent)
+    assert script.startswith("rm -f ~/.gitconfig") and "user.name Dev" in script and "core.autocrlf input" in script, script
+    for bad in ("ghp_", "pw@", "signingkey", "credential", "extraheader", "proxy", "askpass", "insteadof",
+                "sshcommand", "hookspath", "alias", "include", "/tmp/"):
+        assert bad not in script.lower(), (bad, script)
+    # nothing safe left, or no host file: the sandbox copy is still cleared (reused claims)
+    open(gc, "w").write(CREDS.replace("autocrlf = input", "askpass = x")); sent.clear(); s8._push_gitconfig()
+    assert sent == ["rm -f ~/.gitconfig"], sent
+    os.unlink(gc); sent.clear(); s8._push_gitconfig()
+    assert sent == ["rm -f ~/.gitconfig"], sent
 finally:
     os.environ["HOME"] = old_home
-script = "".join(sent)
-assert "user.name Dev" in script and "core.autocrlf input" in script and "alias.co checkout" in script, script
-for bad in ("ghp_", "pw@", "signingkey", "credential", "extraheader", "proxy", "askpass", "insteadof", "remote."):
-    assert bad not in script.lower(), (bad, script)
 print("gitconfig allowlist ok")
+
+# 9. a repository's .git/config in a code dir is sanitized on the way in; other files go as they are
+import tarfile
+code = tempfile.mkdtemp(); repo = os.path.join(code, "r")
+m.subprocess.run(["git", "init", "-q", repo], check=True)
+m.subprocess.run(["git", "-C", repo, "remote", "add", "origin", "https://u:ghp_remote@git.example/r.git"], check=True)
+m.subprocess.run(["git", "-C", repo, "remote", "add", "up", "https://git.example/up.git"], check=True)
+open(os.path.join(repo, ".git", "config"), "a").write(CREDS + "[branch \"main\"]\n\tremote = up\n\tmerge = refs/heads/main\n")
+open(os.path.join(repo, "app.cfg"), "w").write("plain\n")
+pushed = {}
+def fake_run(argv, input=None, **k):
+    with tarfile.open(fileobj=io.BytesIO(input)) as t:
+        for mem in t.getmembers():
+            pushed["/" + mem.name] = t.extractfile(mem).read().decode()
+    return m.subprocess.CompletedProcess(argv, 0, b"", b"")
+s9 = m.Sandbox.__new__(m.Sandbox); s9._exec_argv = lambda *a, **k: ["true"]
+real_run = m.subprocess.run
+m.subprocess.run = lambda argv, *a, **k: fake_run(argv, **k) if argv == ["true"] else real_run(argv, *a, **k)
+try:
+    gcfg, app = os.path.join(repo, ".git", "config"), os.path.join(repo, "app.cfg")
+    s9._tar_push([(gcfg, gcfg), (app, app)])
+finally:
+    m.subprocess.run = real_run
+cfg = pushed[gcfg]
+assert "https://git.example/up.git" in cfg and "repositoryformatversion" in cfg and "merge = refs/heads/main" in cfg, cfg
+for bad in ("ghp_", "pw@", "helper", "extraheader", "sshcommand", "hookspath", "alias", "include", "askpass"):
+    assert bad not in cfg.lower(), (bad, cfg)
+assert pushed[app] == "plain\n"
+print("repo gitconfig ok")
+
+# 10. a variable dropped from the host (or the allowlist) is unset in the sandbox
+os.environ["MY_BUILD_FLAG"] = "on"
+s10 = m.Sandbox.__new__(m.Sandbox)
+s10._env_forward, s10._env_forward_globs = frozenset({"MY_BUILD_FLAG"}), ()
+s10._env_skip, s10._env_skip_globs, s10._host_cmds = m._ENV_SKIP, (), ()
+assert "export MY_BUILD_FLAG=on" in s10._env_payload()
+del os.environ["MY_BUILD_FLAG"]
+p = s10._env_payload()
+assert "unset MY_BUILD_FLAG" in p and "export MY_BUILD_FLAG" not in p, p
+os.environ["MY_BUILD_FLAG"] = "on"; s10._env_forward = frozenset()
+assert "unset MY_BUILD_FLAG" in s10._env_payload()
+del os.environ["MY_BUILD_FLAG"]
+print("env unset ok")

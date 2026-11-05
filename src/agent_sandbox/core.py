@@ -9,8 +9,10 @@ What travels into the sandbox ("host" below = the machine the agent runs on):
   default, so nothing), never host-identity names that would break the sandbox shell (PATH,
   HOME, HOSTNAME, ...). The sandbox runs and builds code; credentials stay on the host. Re-written
   when it changed and sourced by every command, so a changed value is seen by the next command.
-* Git config: the user/core/init/pull/push/alias sections of the host ~/.gitconfig, minus keys
-  that name a token/password/secret/credential/key/proxy and values carrying user:pass@.
+* Git config: an exact key allowlist (identity and everyday settings; no aliases, commands,
+  helpers, http/url/include) of the host ~/.gitconfig, and of each repository's .git/config inside
+  the code dirs (plus what git needs there: format, branches, remotes); values with user:pass@
+  are dropped. Other files in the code dirs are sent as they are.
 * Declared files/dirs (``sync_paths``): pushed at the SAME absolute path, change-checked before
   every command. The host copy is the source of truth; sandbox edits are never copied back.
 * Code (``code_dirs``; default = the task cwd when it is under /workspaces): pushed like declared
@@ -188,14 +190,46 @@ _UNSAFE_SNIPPETS = ("$(", "`", "<(", ">(", "<<", "#", "\r")
 _REMOTE_URL_RE = re.compile(r"^(?!file:)[A-Za-z][A-Za-z0-9+.-]*://")
 _SCP_LIKE_RE = re.compile(r"^[^/:\s]+:(?!/)")  # git@host:group/repo.git, origin-style host:path
 _USERINFO_RE = re.compile(r"://[^/\s@]+@")
-# git config copied into the sandbox: identity and everyday settings, never credentials.
-_GITCONFIG_SECTIONS = ("user.", "core.", "init.", "pull.", "push.", "alias.")
-_GITCONFIG_SECRET_RE = re.compile(r"token|pass|secret|cred|cookie|auth|key|proxy", re.I)
+# Git config that reaches the sandbox is an exact allowlist of keys whose values are names,
+# booleans or refspecs, never commands or credentials (no aliases, sshCommand, askpass, helpers,
+# http.*, url.*, include). Values carrying URL userinfo (user:token@) are dropped as well.
+_GIT_SAFE_KEYS = frozenset({
+    "user.name", "user.email", "init.defaultbranch", "pull.rebase", "pull.ff", "push.default",
+    "push.autosetupremote", "core.autocrlf", "core.eol", "core.filemode", "core.ignorecase",
+    "core.quotepath", "core.precomposeunicode", "core.symlinks", "core.safecrlf",
+})
+# Additionally kept in a repository's own .git/config (needed for git to work in the sandbox).
+_GIT_REPO_KEYS = frozenset({"core.repositoryformatversion", "core.bare", "core.logallrefupdates",
+                            "core.worktree"})
+_GIT_REPO_SUBKEYS = {"branch": {"remote", "merge", "rebase"}, "remote": {"url", "pushurl", "fetch"},
+                     "submodule": {"url", "active", "path", "branch"}}
 
 
-def _gitconfig_key_forwarded(key: str) -> bool:
+def _gitconfig_key_forwarded(key: str, repo: bool = False) -> bool:
+    """``key`` as printed by ``git config --list`` (section and name lower-cased)."""
     k = key.lower()
-    return k.startswith(_GITCONFIG_SECTIONS) and not _GITCONFIG_SECRET_RE.search(k[k.index(".") + 1:])
+    if k in _GIT_SAFE_KEYS or (repo and (k in _GIT_REPO_KEYS or k.startswith("extensions."))):
+        return True
+    section, _, rest = key.partition(".")
+    sub, _, name = rest.rpartition(".")
+    return repo and bool(sub) and name.lower() in _GIT_REPO_SUBKEYS.get(section.lower(), ())
+
+
+def _sanitized_gitconfig(src: str, repo: bool) -> list[tuple[str, str]]:
+    """(key, value) pairs of ``src`` that may enter the sandbox."""
+    r = subprocess.run(["git", "config", "--file", src, "--list", "-z"], capture_output=True, timeout=10)
+    out = []
+    for item in r.stdout.decode(errors="surrogateescape").split("\0"):
+        key, _, val = item.partition("\n")
+        if key and _gitconfig_key_forwarded(key, repo) and not _USERINFO_RE.search(val):
+            out.append((key, val))
+    return out
+
+
+def _is_repo_gitconfig(path: str) -> bool:
+    """A git repository's own config file (``.git/config``, ``.git/modules/<m>/config``)."""
+    parts = Path(path).parts
+    return len(parts) >= 2 and parts[-1] == "config" and ".git" in parts[:-1]
 
 
 _TASK_PATH_RE = re.compile(r"/workspaces/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+/workdir")
@@ -480,13 +514,30 @@ class Sandbox:
         with tarfile.open(fileobj=buf, mode="w") as tar:
             for host, remote in pairs:
                 try:
-                    tar.add(host, arcname=remote.lstrip("/"), recursive=False)
-                except OSError:
+                    if _is_repo_gitconfig(host) and os.path.isfile(host):
+                        self._add_repo_gitconfig(tar, host, remote)
+                    else:
+                        tar.add(host, arcname=remote.lstrip("/"), recursive=False)
+                except (OSError, subprocess.SubprocessError):
                     continue
         r = subprocess.run(self._exec_argv("tar", "xpf", "-", "-C", "/", "--no-same-owner", stdin=True),
                            input=buf.getvalue(), capture_output=True, timeout=300)
         if r.returncode != 0:
             raise RuntimeError(f"agent-sandbox: push failed: {r.stderr.decode(errors='replace')[:300]}")
+
+    @staticmethod
+    def _add_repo_gitconfig(tar: tarfile.TarFile, host: str, remote: str) -> None:
+        """Push a repository's .git/config with only the allowlisted keys (see _GIT_SAFE_KEYS)."""
+        with tempfile.TemporaryDirectory(prefix="agent-sbx-gitcfg-") as d:
+            tmp = os.path.join(d, "config")
+            open(tmp, "w").close()
+            for key, val in _sanitized_gitconfig(host, repo=True):
+                subprocess.run(["git", "config", "--file", tmp, "--add", key, val],
+                               capture_output=True, timeout=10, check=True)
+            info = tar.gettarinfo(host, arcname=remote.lstrip("/"))
+            data = open(tmp, "rb").read()
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
 
     def _rm_remote(self, paths: list[str]) -> None:
         if paths:
@@ -615,8 +666,15 @@ class Sandbox:
                 and not any(fnmatch.fnmatchcase(k, g) for g in self._env_skip_globs))
 
     def _env_payload(self) -> str:
-        env = "".join(f"export {k}={shlex.quote(v)}\n" for k, v in sorted(os.environ.items())
-                      if self._env_forwarded(k))
+        names = sorted(k for k in os.environ if self._env_forwarded(k))
+        # A name forwarded earlier in this session but not any more (removed from the host or
+        # from the allowlist) is unset, so a value kept by an adapter's shell snapshot goes too.
+        sent = getattr(self, "_env_sent", set())
+        gone = sorted(sent - set(names))
+        sent.update(names)
+        self._env_sent = sent
+        env = "".join(f"unset {k}\n" for k in gone)
+        env += "".join(f"export {k}={shlex.quote(os.environ[k])}\n" for k in names)
         return env + self._shims()
 
     def _shims(self) -> str:
@@ -835,23 +893,14 @@ class Sandbox:
         return has_host
 
     def _push_gitconfig(self) -> None:
-        """host git identity and everyday settings only: the user/core/init/pull/push/alias sections,
-        minus keys whose name mentions a token/password/secret and values carrying user:pass@."""
+        """Replace the sandbox ~/.gitconfig with the allowlisted part of the host's (identity and
+        everyday settings, see _GIT_SAFE_KEYS). Always replaced, so a reused claim keeps nothing
+        from an earlier session."""
         src = os.path.expanduser("~/.gitconfig")
-        if not os.path.isfile(src):
-            return
         try:
-            r = subprocess.run(["git", "config", "--file", src, "--list", "--name-only"],
-                               capture_output=True, text=True, timeout=10)
-            keep = [k for k in r.stdout.splitlines() if _gitconfig_key_forwarded(k)]
-            lines = []
-            for k in dict.fromkeys(keep):
-                vals = subprocess.run(["git", "config", "--file", src, "--get-all", k],
-                                      capture_output=True, text=True, timeout=10).stdout.splitlines()
-                lines += [f"git config --global --add {shlex.quote(k)} {shlex.quote(v)}" for v in vals
-                          if not _USERINFO_RE.search(v)]  # URLs with user:password@
-            if lines:
-                self._exec_simple("rm -f ~/.gitconfig; " + "; ".join(lines))
+            pairs = _sanitized_gitconfig(src, repo=False) if os.path.isfile(src) else []
+            lines = [f"git config --global --add {shlex.quote(k)} {shlex.quote(v)}" for k, v in pairs]
+            self._exec_simple("; ".join(["rm -f ~/.gitconfig"] + lines))
         except Exception as e:
             logger.warning("agent-sandbox: gitconfig push failed: %s", e)
 

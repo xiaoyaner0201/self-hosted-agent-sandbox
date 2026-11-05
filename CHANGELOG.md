@@ -6,11 +6,15 @@
   `AGENT_SANDBOX_FORWARD_ENV` (adapters: `agent_sandbox_forward_env`) names them, by name or glob;
   the default is empty. `AGENT_SANDBOX_ENV_SKIP` still withholds names the allowlist matches.
   Upgrading: list the variables your builds need, e.g. `MY_BUILD_FLAG,NPM_CONFIG_REGISTRY`; never tokens or keys.
-- The git config copied into the sandbox is an allowlist: `user`, `core`, `init`, `pull`, `push`
-  and `alias`, minus keys that name a token, password, secret, credential, key or proxy, and
-  values with `user:pass@`.
-- Tests: `core_unit.py` and `route_table.py` cover both allowlists, including a host API key and
-  credential-bearing git settings that must not reach the sandbox.
+- A variable forwarded earlier in the session and then dropped (from the host or the allowlist)
+  is unset in the sandbox.
+- Git config is an exact key allowlist: identity and everyday settings from `~/.gitconfig`; for
+  each repository's `.git/config` in the code dirs also format, branches, remote URLs and fetch
+  refspecs. No aliases, `core.sshCommand`, `core.askpass`, hooks paths, helpers, includes,
+  `http.*`, `url.*`, nor values with `user:pass@`. A reused sandbox's copy is always replaced.
+- Tests: `core_unit.py` and `route_table.py` cover the allowlists with a host API key, credential
+  settings in key names and in values (aliases, `sshCommand`), a repository config with a token in
+  its remote URL, and unset of a dropped variable.
 
 ## 0.1.0 — first release
 
