@@ -159,6 +159,9 @@ try:
     finally:
         m._sanitized_gitconfig = real_san
     assert sent == ["rm -f ~/.gitconfig"], sent
+    # malformed host config: git prints a partial list and exits 128; none of it is used
+    open(gc, "w").write("[user]\n\tname = Partial\n[broken\n"); sent.clear(); s8._push_gitconfig()
+    assert sent == ["rm -f ~/.gitconfig"], sent
 finally:
     os.environ["HOME"] = old_home
 print("gitconfig allowlist ok")
@@ -186,7 +189,7 @@ try:
     open(wt, "w").write(CREDS)
     s9._tar_push([(gcfg, gcfg), (app, app), (wt, wt)])
     # sanitizing fails: the sandbox gets an empty file, never the raw one
-    real_add = m.Sandbox._add_repo_gitconfig
+    real_add = m.Sandbox.__dict__["_add_repo_gitconfig"]
     m.Sandbox._add_repo_gitconfig = staticmethod(lambda *a: (_ for _ in ()).throw(OSError("git missing")))
     try:
         bad = os.path.join(repo, ".git", "modules", "x", "config"); os.makedirs(os.path.dirname(bad))
@@ -194,9 +197,13 @@ try:
         s9._tar_push([(bad, bad)])
     finally:
         m.Sandbox._add_repo_gitconfig = real_add
+    broken = os.path.join(repo, ".git", "modules", "x", "config.worktree")
+    open(broken, "w").write("[remote \"o\"]\n\turl = https://git.example/o.git\n[broken\n")
+    s9._tar_push([(broken, broken)])
 finally:
     m.subprocess.run = real_run
 assert pushed[bad] == "", pushed[bad]
+assert pushed[broken] == "", pushed[broken]
 wcfg = pushed[wt]
 for bad_s in ("ghp_", "helper", "extraheader", "sshcommand", "hookspath", "alias", "askpass"):
     assert bad_s not in wcfg.lower(), (bad_s, wcfg)

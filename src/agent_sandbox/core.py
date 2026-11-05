@@ -220,6 +220,8 @@ def _gitconfig_key_forwarded(key: str, repo: bool = False) -> bool:
 def _sanitized_gitconfig(src: str, repo: bool) -> list[tuple[str, str]]:
     """(key, value) pairs of ``src`` that may enter the sandbox."""
     r = subprocess.run(["git", "config", "--file", src, "--list", "-z"], capture_output=True, timeout=10)
+    if r.returncode != 0:  # malformed file: git may still print a partial list; use none of it
+        raise subprocess.CalledProcessError(r.returncode, "git config --list", stderr=r.stderr)
     out = []
     for item in r.stdout.decode(errors="surrogateescape").split("\0"):
         key, _, val = item.partition("\n")
