@@ -32,7 +32,7 @@ Agent 原来跑在哪台机器上，接入后还跑在那里，只有 **它执�
 | Claude Code | 用沙箱提供的 MCP 工具替换自带的 Bash/Read/Write/Edit | 🛠️ 计划中 |
 | Codex CLI | 官方远端执行环境（沙箱里跑 `codex exec-server`），备选 MCP | 🛠️ 计划中 |
 | Multica 运行时 | 经上面几个 Agent 适配接入；覆盖分配任务、Webhook 自动化（如 `pull_request`）和 PR 唤醒 | 🛠️ 计划中 |
-| OmniRoute | 加一个 `ContainerProvider`，让它的 `execute_code` / `execute_command` 技能跑在这里 | 🛠️ 计划中 |
+| [OmniRoute](https://github.com/cheaper-inference/OmniRoute) | 技能运行时 `agent-sandbox`：`execute_command` / `eval_code` 从预热池领 Pod 执行（[接入说明](docs/omniroute.md)） | 🔄 上游 PR [#19130](https://github.com/cheaper-inference/OmniRoute/pull/19130) 已提交、未合并；实验集群已验证 |
 
 其他程序可以直接调命令行或核心库。
 

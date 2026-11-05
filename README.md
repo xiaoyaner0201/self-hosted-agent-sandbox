@@ -32,7 +32,7 @@ Built on [k3s](https://k3s.io), [kubernetes-sigs/agent-sandbox](https://github.c
 | Claude Code | built-in Bash/Read/Write/Edit replaced by MCP tools backed by the sandbox | 🛠️ planned |
 | Codex CLI | native remote execution environment (`codex exec-server` in the sandbox), MCP as fallback | 🛠️ planned |
 | Multica runtimes | through the agent adapters above; covers assigned issues, webhook autopilots (e.g. on `pull_request`) and PR wakeups | 🛠️ planned |
-| OmniRoute | a `ContainerProvider` that runs its `execute_code` / `execute_command` skills here | 🛠️ planned |
+| [OmniRoute](https://github.com/cheaper-inference/OmniRoute) | `agent-sandbox` skill runtime: `execute_command` / `eval_code` claim a pod from the pool ([guide](docs/omniroute.md)) | 🔄 upstream PR [#19130](https://github.com/cheaper-inference/OmniRoute/pull/19130) open, not merged; verified on a lab cluster |
 
 Anything else can call the CLI or the library directly.
 
