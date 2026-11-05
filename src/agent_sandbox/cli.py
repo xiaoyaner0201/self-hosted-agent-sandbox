@@ -5,7 +5,7 @@
   sbx release --session ID                                     delete the session's claim
 
 Configuration comes from AGENT_SANDBOX_* environment variables (KUBECONFIG, POOL, NAMESPACE,
-CODE_DIRS, HOST_COMMANDS, ENV_SKIP, SYNC_PATHS, IDLE_TTL, ...); see the README.
+CODE_DIRS, HOST_COMMANDS, FORWARD_ENV, ENV_SKIP, SYNC_PATHS, IDLE_TTL, ...); see the README.
 ``--keep`` keeps the claim for the next ``sbx exec --session ID`` (persistent mode), so a
 sequence of calls shares one sandbox until ``sbx release``.
 """

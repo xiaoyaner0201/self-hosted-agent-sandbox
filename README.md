@@ -108,7 +108,8 @@ Environment variables (adapters may also take them from their own config, e.g. H
 | `AGENT_SANDBOX_SYNC_PATHS` | – | config files/dirs pushed at the same path |
 | `AGENT_SANDBOX_CODE_DIRS` | task dir | two-way synced code dirs |
 | `AGENT_SANDBOX_HOST_COMMANDS` | git network ops, `git remote add/set-url` | command prefixes that run on the host, matched word by word (replaces the default list) |
-| `AGENT_SANDBOX_ENV_SKIP` | – | extra variable names not to forward; globs like `*_TOKEN` work |
+| `AGENT_SANDBOX_FORWARD_ENV` | – (nothing) | host variables to forward, by name or glob, e.g. `MY_BUILD_FLAG,NPM_CONFIG_REGISTRY`. Never list tokens or keys |
+| `AGENT_SANDBOX_ENV_SKIP` | – | names to withhold even when the allowlist matches them (globs like `*_TOKEN` work) |
 | `AGENT_SANDBOX_TASK_FILES` | – | files in a task root (`/workspaces/<ws>/<task>/`) pushed with the workdir, never pulled back |
 | `AGENT_SANDBOX_IDLE_TTL` | `1800` | cluster-side expiry in seconds, renewed while active |
 | `AGENT_SANDBOX_PERSISTENT` | `false` | reuse one claim per session label |
@@ -141,32 +142,33 @@ Each arrow starts at the side that opens the connection.
 ## 🔒 Security
 
 - Sandboxes run under **gVisor**, as a non-root uid, with no service-account token and no service links.
-- The git config copied into the sandbox drops credential helpers, includes, `extraheader`/cookie/SSL-key settings and any URL with `user:pass@`.
+- **Credentials stay on the host.** The sandbox runs and builds code; it gets no host variable you have not named in `AGENT_SANDBOX_FORWARD_ENV` (empty by default), and git network commands that need credentials run on the host.
+- The git config copied into the sandbox is an allowlist: the `user`, `core`, `init`, `pull`, `push` and `alias` sections, minus any key whose name mentions a token, password, secret, credential, key or proxy and any value with `user:pass@`. Credential helpers, includes, `http.*` and `url.*` never go in.
 - Pull-back into `.git` is an allowlist (objects, refs, logs, `HEAD`, `index`, `packed-refs`, …). Config, hooks, gitfiles and everything else stay as the host has them, host-side git runs with `safe.bareRepository=explicit`, and writes through host symlinks that lead out of the code dirs are refused, so nothing built in the sandbox can plant a hook that a later host-side `git push` runs.
 - Package caches are per tenant, so one tenant cannot poison another tenant's cache.
 - The agent host's service account may only manage `sandboxclaims` and exec into pods in one namespace.
 - Host commands run with the host process's own `PATH`; the router checks the command text, not which `git` binary that `PATH` resolves to, so keep the host `PATH` free of directories the agent can write.
 
 > [!WARNING]
-> Forwarding is wholesale by default, so secrets in the host process's variables reach the sandbox unless you withhold them, e.g. `AGENT_SANDBOX_ENV_SKIP="*_TOKEN,*_SECRET,*_PASSWORD,*_API_KEY"`.
+> No host variable is forwarded by default. Name only what builds need, e.g. `AGENT_SANDBOX_FORWARD_ENV="MY_BUILD_FLAG,NPM_CONFIG_REGISTRY"`, and never put tokens or API keys in the list: anything forwarded is readable by every command in the sandbox.
 
 ## 🧪 Tests
 
 - `tests/route_table.py` (fixed cases) and `tests/route_fuzz.py` (random commands run through real bash, asserting nothing is written outside the code dir) check host-command routing offline: `python tests/route_table.py`.
-- `tests/core_unit.py` checks error handling, streaming output and `release` offline with a fake `kubectl`.
+- `tests/core_unit.py` checks error handling, streaming output, `release`, the variable allowlist (empty by default: a host API key does not reach the sandbox) and the git config allowlist offline with a fake `kubectl`.
 - `tests/e2e.sh` drives the `sbx` CLI against a real cluster: gVisor, variable forwarding, pull-back of files and commits, host routing, claim reuse and release, exit codes.
 - Adapter repos carry their own acceptance suites (for Hermes: 26 + 15 end-to-end checks).
 
 ## 🔍 What it touches
 
 - **Runs** `kubectl` (the binary you point it at) as a subprocess, with the kubeconfig you name, against that kubeconfig's API server only.
-- **Sends into the sandbox:** the host process's variables (minus the skip list), the files in `AGENT_SANDBOX_SYNC_PATHS` and `AGENT_SANDBOX_TASK_FILES`, the code directories, any seed directories an adapter passes (e.g. a read-only skills copy) and the host git config without credential-bearing settings.
+- **Sends into the sandbox:** the host variables named in `AGENT_SANDBOX_FORWARD_ENV` (none by default), the files in `AGENT_SANDBOX_SYNC_PATHS` and `AGENT_SANDBOX_TASK_FILES`, the code directories, any seed directories an adapter passes (e.g. a read-only skills copy) and the allowlisted part of the host git config.
 - **Writes on the host:** only inside the code directories, with files the sandbox created, changed or deleted there (in `.git` only history and index; never through symlinks that leave the code dirs).
 - **No other network calls,** no telemetry, no stored credentials, no background process of its own.
 
 ## 🛣️ Status
 
-Early. The core was extracted unchanged from the Hermes plugin, where it went through nine rounds of independent release QA. Linux x86_64 nodes, k3s v1.37.
+Early. The core was extracted from the Hermes plugin, where it went through nine rounds of independent release QA. Linux x86_64 nodes, k3s v1.37.
 
 ## 📄 License
 

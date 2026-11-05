@@ -5,9 +5,12 @@ from a SandboxWarmPool. Transport = ``kubectl exec`` (spawn-per-call). No agent 
 imported here; adapters (Hermes plugin, MCP server, CLI) build on :class:`Sandbox`.
 
 What travels into the sandbox ("host" below = the machine the agent runs on):
-* Environment: the host process environment, wholesale, minus host-identity names that would
-  break the sandbox shell (PATH, HOME, HOSTNAME, ...). Re-written when it changed and sourced by
-  every command, so a changed value is seen by the next command.
+* Environment: only the host variables named in ``forward_env`` (names or globs; empty by
+  default, so nothing), never host-identity names that would break the sandbox shell (PATH,
+  HOME, HOSTNAME, ...). The sandbox runs and builds code; credentials stay on the host. Re-written
+  when it changed and sourced by every command, so a changed value is seen by the next command.
+* Git config: the user/core/init/pull/push/alias sections of the host ~/.gitconfig, minus keys
+  that name a token/password/secret/credential/key/proxy and values carrying user:pass@.
 * Declared files/dirs (``sync_paths``): pushed at the SAME absolute path, change-checked before
   every command. The host copy is the source of truth; sandbox edits are never copied back.
 * Code (``code_dirs``; default = the task cwd when it is under /workspaces): pushed like declared
@@ -103,7 +106,8 @@ _CLAIM_API = "extensions.agents.x-k8s.io/v1beta1"
 _STATE_DIR = "/tmp/.agent-sbx"
 _ENV_FILE = f"{_STATE_DIR}/env.sh"
 _MARK_FILE = f"{_STATE_DIR}/mark"
-# Host-identity names that must come from the sandbox itself (or the shell breaks / lies).
+# Host-identity names that must come from the sandbox itself (or the shell breaks / lies);
+# never forwarded, even when the allowlist names them.
 _ENV_SKIP = frozenset({
     "PATH", "HOME", "HOSTNAME", "PWD", "OLDPWD", "SHLVL", "_", "TERM", "SHELL", "USER", "LOGNAME",
     "TMPDIR", "SSH_AUTH_SOCK", "SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY", "DISPLAY", "PS1",
@@ -184,6 +188,16 @@ _UNSAFE_SNIPPETS = ("$(", "`", "<(", ">(", "<<", "#", "\r")
 _REMOTE_URL_RE = re.compile(r"^(?!file:)[A-Za-z][A-Za-z0-9+.-]*://")
 _SCP_LIKE_RE = re.compile(r"^[^/:\s]+:(?!/)")  # git@host:group/repo.git, origin-style host:path
 _USERINFO_RE = re.compile(r"://[^/\s@]+@")
+# git config copied into the sandbox: identity and everyday settings, never credentials.
+_GITCONFIG_SECTIONS = ("user.", "core.", "init.", "pull.", "push.", "alias.")
+_GITCONFIG_SECRET_RE = re.compile(r"token|pass|secret|cred|cookie|auth|key|proxy", re.I)
+
+
+def _gitconfig_key_forwarded(key: str) -> bool:
+    k = key.lower()
+    return k.startswith(_GITCONFIG_SECTIONS) and not _GITCONFIG_SECRET_RE.search(k[k.index(".") + 1:])
+
+
 _TASK_PATH_RE = re.compile(r"/workspaces/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+/workdir")
 # Default host commands: git network operations only. A CLI that can run user-defined code
 # (aliases, extensions, plugins) must not be listed wholesale; list exact sub-commands instead,
@@ -322,7 +336,9 @@ class Sandbox:
 
     ``config`` keys are the ``agent_sandbox_*`` names (each falls back to its AGENT_SANDBOX_*
     environment variable). ``app`` labels the claims; ``seed_dirs`` are (host_dir, path under the
-    sandbox HOME) pairs copied in once at start; ``extra_env_skip`` adds names never forwarded."""
+    sandbox HOME) pairs copied in once at start; ``extra_env_skip`` adds names never forwarded.
+    Host variables reach the sandbox only when ``agent_sandbox_forward_env`` names them (empty by
+    default): the sandbox runs and builds code, credentials stay on the host."""
 
     def __init__(self, *, cwd: str = "", timeout: int = 600, session: str = "default",
                  config: dict | None = None, app: str = "agent-sandbox",
@@ -345,6 +361,10 @@ class Sandbox:
             _cfg(cc, "agent_sandbox_sync_paths", "AGENT_SANDBOX_SYNC_PATHS", ""))]
         host_cmds = _cfg(cc, "agent_sandbox_host_commands", "AGENT_SANDBOX_HOST_COMMANDS", None)
         self._host_cmds = tuple(_as_list(host_cmds)) if host_cmds is not None else _DEFAULT_HOST_CMDS
+        # Allowlist of host variables to forward (names or globs such as NPM_CONFIG_*). Empty by default.
+        fwd = _as_list(_cfg(cc, "agent_sandbox_forward_env", "AGENT_SANDBOX_FORWARD_ENV", ""))
+        self._env_forward = frozenset(x for x in fwd if not _GLOB_CHARS & set(x))
+        self._env_forward_globs = tuple(x for x in fwd if _GLOB_CHARS & set(x))
         skip = _as_list(_cfg(cc, "agent_sandbox_env_skip", "AGENT_SANDBOX_ENV_SKIP", ""))
         self._env_skip = (_ENV_SKIP | frozenset(extra_env_skip)
                           | frozenset(x for x in skip if not _GLOB_CHARS & set(x)))
@@ -588,9 +608,10 @@ class Sandbox:
             logger.info("agent-sandbox: pull-back wrote %d, deleted %d %s", written, deleted, gone[:8])
         return (written, deleted)
 
-    # ---- environment: wholesale, re-written when changed ---------------------
+    # ---- environment: allowlist only, re-written when changed ----------------
     def _env_forwarded(self, k: str) -> bool:
-        return (k not in self._env_skip and bool(_NAME_RE.match(k))
+        return ((k in self._env_forward or any(fnmatch.fnmatchcase(k, g) for g in self._env_forward_globs))
+                and k not in self._env_skip and bool(_NAME_RE.match(k))
                 and not any(fnmatch.fnmatchcase(k, g) for g in self._env_skip_globs))
 
     def _env_payload(self) -> str:
@@ -814,16 +835,15 @@ class Sandbox:
         return has_host
 
     def _push_gitconfig(self) -> None:
-        """host git identity/settings without credential helpers (no token path in sandbox)."""
+        """host git identity and everyday settings only: the user/core/init/pull/push/alias sections,
+        minus keys whose name mentions a token/password/secret and values carrying user:pass@."""
         src = os.path.expanduser("~/.gitconfig")
         if not os.path.isfile(src):
             return
         try:
             r = subprocess.run(["git", "config", "--file", src, "--list", "--name-only"],
                                capture_output=True, text=True, timeout=10)
-            keep = [k for k in r.stdout.split()
-                    if not k.startswith(("credential.", "include.", "includeif."))
-                    and not k.endswith(("extraheader", "cookiefile", "sslkey", "sslcert"))]
+            keep = [k for k in r.stdout.splitlines() if _gitconfig_key_forwarded(k)]
             lines = []
             for k in dict.fromkeys(keep):
                 vals = subprocess.run(["git", "config", "--file", src, "--get-all", k],

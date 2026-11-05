@@ -127,10 +127,24 @@ d = tempfile.mkdtemp(); out = tempfile.mkdtemp()
 os.makedirs(f"{d}/code"); os.symlink(out, f"{d}/code/link")
 assert m._inside(f"{d}/code/sub", [f"{d}/code"]) and not m._inside(f"{d}/code/link", [f"{d}/code"])
 print("inside ok")
-# env glob skip
-E._env_skip = m._ENV_SKIP | {"FOO"}; E._env_skip_globs = ("*_TOKEN", "SLACK_*")
-assert not E._env_forwarded("GITLAB_TOKEN") and not E._env_forwarded("SLACK_APP_SECRET") and not E._env_forwarded("FOO") and E._env_forwarded("BAR") and not E._env_forwarded("PATH")
-print("env skip ok")
+# env: allowlist only (empty forwards nothing), skip list and host-identity names still win
+E._env_forward, E._env_forward_globs = frozenset(), ()
+E._env_skip, E._env_skip_globs = m._ENV_SKIP, ()
+assert not any(E._env_forwarded(k) for k in ("OPENAI_API_KEY", "GITLAB_TOKEN", "BAR", "LANG"))
+E._env_forward = frozenset({"BAR", "PATH", "FOO", "bad-name"}); E._env_forward_globs = ("NPM_CONFIG_*",)
+E._env_skip = m._ENV_SKIP | {"FOO"}; E._env_skip_globs = ("*_TOKEN",)
+assert E._env_forwarded("BAR") and E._env_forwarded("NPM_CONFIG_REGISTRY")
+assert not E._env_forwarded("NPM_CONFIG_TOKEN") and not E._env_forwarded("FOO") and not E._env_forwarded("PATH")
+assert not E._env_forwarded("bad-name") and not E._env_forwarded("OPENAI_API_KEY")
+print("env allowlist ok")
+# gitconfig: section allowlist minus credential-looking key names
+for k in ("user.name", "user.email", "core.autocrlf", "init.defaultBranch", "pull.rebase", "push.default", "alias.co"):
+    assert m._gitconfig_key_forwarded(k), k
+for k in ("credential.helper", "http.extraheader", "http.proxy", "url.https://x/.insteadof", "include.path",
+          "includeif.gitdir:~/w/.path", "user.signingkey", "user.token", "core.sshcommand.pass", "core.askpass",
+          "alias.gettoken", "core.gitproxy", "sendemail.smtppass", "github.token", "gpg.program"):
+    assert not m._gitconfig_key_forwarded(k), k
+print("gitconfig allowlist ok")
 # safe_makedirs + symlink parent
 d = os.path.realpath(tempfile.mkdtemp()); out = os.path.realpath(tempfile.mkdtemp())
 root = f"{d}/code"; os.makedirs(root); os.symlink(out, f"{root}/lnk")
