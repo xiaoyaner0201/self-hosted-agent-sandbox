@@ -16,7 +16,7 @@ This adapter does not use the Python core or `sbx`: OmniRoute talks to the clust
 
 ## Setup
 
-Cluster side, follow the main [Quick start](../README.md#-quick-start): `cluster/rbac.yaml` already grants exactly what OmniRoute needs (sandboxclaims create/get/watch/delete, pods get, pods/exec create in `sbx`), and `cluster/make-kubeconfig.sh` writes the kubeconfig. Render one pool per image OmniRoute should offer, using images that contain the interpreter (`sh` for `execute_command`, `python` / `node` for `eval_code`).
+Cluster side, follow the main [Quick start](../README.md#-quick-start): `cluster/rbac.yaml` already includes what OmniRoute needs (sandboxclaims create/get/watch/delete, pods get, pods/exec create in `sbx`), and `cluster/make-kubeconfig.sh` writes the kubeconfig. Render one pool per image OmniRoute should offer, using images that contain the interpreter (`sh` for `execute_command`, `python` / `node` for `eval_code`).
 
 OmniRoute side (`.env`; the host needs `sh` and `kubectl`):
 
@@ -31,7 +31,7 @@ SKILLS_AGENT_SANDBOX_POOL=sbx-py            # fallback for other allowed images
 # SKILLS_AGENT_SANDBOX_CLAIM_TIMEOUT_S=60
 ```
 
-The pool, not the image name, decides what actually runs: OmniRoute's image allowlist (`SKILLS_ALLOWED_SANDBOX_IMAGES`) still applies first, and each allowed image must map to a pool. Isolation (gVisor), CPU and memory limits and network access come from the pool's `SandboxTemplate`; OmniRoute's own `--memory` / `--network none` settings are not applied in this mode.
+The pool, not the image name, decides what actually runs: OmniRoute's image allowlist (`SKILLS_ALLOWED_SANDBOX_IMAGES`) still applies first, and each allowed image must map to a pool. Isolation (gVisor) and CPU and memory limits come from the pool's `SandboxTemplate`. OmniRoute's own `--memory` / `--network none` settings are not applied in this mode, and pools rendered by `cluster/render-pool.py` set `networkPolicyManagement: Unmanaged`, so sandbox egress is whatever your cluster's network policy allows; add a `NetworkPolicy` for the pool if skill code must not reach the network.
 
 ## Verified
 
@@ -50,6 +50,6 @@ Against a kind cluster with agent-sandbox v1.0.9 and gVisor, calling OmniRoute's
 
 每次执行：从镜像对应的预热池创建 `SandboxClaim` → 等 `Ready` → 在认领的 Pod 里 `kubectl exec` → 删除 claim（超时、`SIGTERM` 同样删除；OmniRoute 意外退出时由 claim 的 `shutdownTime` 兜底）。
 
-集群侧照主文档快速开始做：`cluster/rbac.yaml` 的权限正好够用，`cluster/make-kubeconfig.sh` 生成 kubeconfig；OmniRoute 要提供几种镜像，就渲染几个池。OmniRoute 侧配置见上面的 `.env` 示例（主机需要 `sh` 和 `kubectl`）。隔离、CPU/内存上限和网络由池的 `SandboxTemplate` 决定，OmniRoute 自己的内存和断网设置在这个模式下不生效。
+集群侧照主文档快速开始做：`cluster/rbac.yaml` 已包含所需权限，`cluster/make-kubeconfig.sh` 生成 kubeconfig；OmniRoute 要提供几种镜像，就渲染几个池。OmniRoute 侧配置见上面的 `.env` 示例（主机需要 `sh` 和 `kubectl`）。OmniRoute 的镜像白名单（`SKILLS_ALLOWED_SANDBOX_IMAGES`）仍先生效，每个允许的镜像都要映射到一个池；实际运行的是池的镜像，不看请求里的镜像名。隔离（gVisor）和 CPU/内存上限由池的 `SandboxTemplate` 决定；OmniRoute 自己的内存和断网设置在这个模式下不生效，而 `cluster/render-pool.py` 渲染的池是 `networkPolicyManagement: Unmanaged`，沙箱能否出网取决于集群的网络策略，技能代码不该联网时请给池加 `NetworkPolicy`。
 
 已验证：kind 集群 + agent-sandbox v1.0.9 + gVisor，直接调用 OmniRoute 的技能：内核为 `4.19.0-gvisor`、主机名为沙箱 Pod，退出码 3 原样返回，3 秒超时 `killed: true`，结束后无残留 claim。
