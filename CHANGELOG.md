@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.0
+
+- **Published on PyPI**: `pip install self-hosted-agent-sandbox`. Releases are built and uploaded
+  by `.github/workflows/publish.yml` on a version tag, through a PyPI trusted publisher (no stored token).
+- **Import name is now `self_hosted_agent_sandbox`** (was `agent_sandbox`), matching the
+  distribution name; another PyPI project already installs a top-level `agent_sandbox`.
+  Upgrading: `from self_hosted_agent_sandbox import Sandbox`. Behaviour, the `sbx` command,
+  the `AGENT_SANDBOX_*` variables and `agent_sandbox_*` config keys are unchanged.
+
 ## 0.2.0
 
 - **Variables are an allowlist now.** Host variables reach the sandbox only when

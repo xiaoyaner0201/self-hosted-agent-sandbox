@@ -5,7 +5,7 @@ export PYTHONPATH=/in/src AGENT_SANDBOX_KUBECTL=/in/kubectl AGENT_SANDBOX_KUBECO
 W=/workspaces/sbx-e2e/w1/workdir; rm -rf /workspaces/sbx-e2e; mkdir -p $W; cd $W
 git init -q -b main . && git -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
 export AGENT_SANDBOX_CODE_DIRS=$W SBX_PROBE=hello SBX_PROBE_SECRET_TOKEN=must-not-leak AGENT_SANDBOX_FORWARD_ENV=SBX_PROBE
-SBX="python3 -m agent_sandbox.cli"
+SBX="python3 -m self_hosted_agent_sandbox.cli"
 pass=0; fail=0; ck(){ if eval "$2"; then pass=$((pass+1)); echo "PASS $1"; else fail=$((fail+1)); echo "FAIL $1"; fi; }
 out=$($SBX exec --session e2e1 -- 'cat /proc/version; hostname; echo $SBX_PROBE; echo tok=${SBX_PROBE_SECRET_TOKEN:-none}' 2>&1); ck runs_in_gvisor '[[ "$out" == *gVisor* || "$out" == *gvisor* ]] && [[ "$out" != *"$(hostname)"* ]]'
 ck env_forwarded '[[ "$out" == *hello* ]]'

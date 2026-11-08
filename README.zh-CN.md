@@ -21,7 +21,7 @@ Agent 原来跑在哪台机器上，接入后还跑在那里，只有 **它执�
 | 部分 | 内容 |
 |---|---|
 | `cluster/` | 节点安装（给沙箱划固定内存上限）、gVisor、最小权限账号和 kubeconfig、按租户的预热池和每节点依赖缓存、缓存清理 |
-| `src/agent_sandbox/` | 核心库（`Sandbox`）：领用、续期、释放，环境变量和文件同步，带 `.git` 白名单的代码双向同步，哪些命令回原机器执行。纯 Python，无依赖 |
+| `src/self_hosted_agent_sandbox/` | 核心库（`Sandbox`）：领用、续期、释放，环境变量和文件同步，带 `.git` 白名单的代码双向同步，哪些命令回原机器执行。纯 Python，无依赖 |
 | `sbx` | 基于核心库的命令行：`sbx exec`、`sbx shell`、`sbx release` |
 
 ## 🔌 适配
@@ -70,7 +70,7 @@ cluster/make-kubeconfig.sh https://10.0.0.11:6443 > agent-sandbox.kubeconfig   #
 **3. Agent 主机**
 
 ```bash
-pip install git+https://github.com/xiaoyaner0201/self-hosted-agent-sandbox
+pip install self-hosted-agent-sandbox
 export AGENT_SANDBOX_KUBECONFIG=$PWD/agent-sandbox.kubeconfig AGENT_SANDBOX_POOL=sbx-team-a
 cd /workspaces/my-repo
 sbx exec --session demo -- 'cat /proc/version; make test'     # 在新的 gVisor 沙箱里跑
@@ -82,7 +82,7 @@ sbx exec --session demo -- git push origin HEAD                # 在本机跑，
 在 Python 里用：
 
 ```python
-from agent_sandbox import Sandbox
+from self_hosted_agent_sandbox import Sandbox
 sb = Sandbox(cwd="/workspaces/my-repo", session="task-42")
 print(sb.execute("pytest -q")["output"])
 sb.close()

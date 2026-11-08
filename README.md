@@ -21,7 +21,7 @@ Built on [k3s](https://k3s.io), [kubernetes-sigs/agent-sandbox](https://github.c
 | Part | What it is |
 |---|---|
 | `cluster/` | node install with a hard pod memory budget, gVisor, least-privilege RBAC and kubeconfig, per-tenant warm pools with per-node caches, cache GC |
-| `src/agent_sandbox/` | the core library (`Sandbox`): claim / renew / release, environment and file sync, two-way code sync with a `.git` allowlist, host-command routing. Pure Python, no dependencies |
+| `src/self_hosted_agent_sandbox/` | the core library (`Sandbox`): claim / renew / release, environment and file sync, two-way code sync with a `.git` allowlist, host-command routing. Pure Python, no dependencies |
 | `sbx` | a CLI over the core: `sbx exec`, `sbx shell`, `sbx release` |
 
 ## 🔌 Adapters
@@ -70,7 +70,7 @@ cluster/make-kubeconfig.sh https://10.0.0.11:6443 > agent-sandbox.kubeconfig   #
 **3. Agent host**
 
 ```bash
-pip install git+https://github.com/xiaoyaner0201/self-hosted-agent-sandbox
+pip install self-hosted-agent-sandbox
 export AGENT_SANDBOX_KUBECONFIG=$PWD/agent-sandbox.kubeconfig AGENT_SANDBOX_POOL=sbx-team-a
 cd /workspaces/my-repo
 sbx exec --session demo -- 'cat /proc/version; make test'     # runs in a fresh gVisor sandbox
@@ -82,7 +82,7 @@ sbx exec --session demo -- git push origin HEAD                # runs on this ho
 From Python:
 
 ```python
-from agent_sandbox import Sandbox
+from self_hosted_agent_sandbox import Sandbox
 sb = Sandbox(cwd="/workspaces/my-repo", session="task-42")
 print(sb.execute("pytest -q")["output"])
 sb.close()

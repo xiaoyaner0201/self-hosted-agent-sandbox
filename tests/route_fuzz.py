@@ -3,7 +3,7 @@ Random commands from a token pool: every command routed to the host is run under
 sandbox dir with tracing; we assert bash only ever executed allowlisted programs with arguments
 that the parser saw (bash's own word list must equal shlex's)."""
 import importlib.util, os, random, subprocess, sys, tempfile, json
-spec = importlib.util.spec_from_file_location("e", os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src", "agent_sandbox", "core.py"))
+spec = importlib.util.spec_from_file_location("e", os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src", "self_hosted_agent_sandbox", "core.py"))
 m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 root = os.path.realpath(tempfile.mkdtemp(prefix="fz-")); os.makedirs(f"{root}/code/sub/deep"); os.symlink(f"{root}/code/sub/deep", f"{root}/code/dl")
 E = m.Sandbox.__new__(m.Sandbox)

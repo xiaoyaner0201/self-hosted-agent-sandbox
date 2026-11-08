@@ -1,7 +1,7 @@
 """Offline unit checks of the core's non-routing paths with a fake kubectl. Run: python tests/core_unit.py"""
 import importlib.util, io, json, os, stat, sys, tempfile
 here = os.path.dirname(os.path.abspath(__file__))
-spec = importlib.util.spec_from_file_location("core", os.path.join(here, "..", "src", "agent_sandbox", "core.py"))
+spec = importlib.util.spec_from_file_location("core", os.path.join(here, "..", "src", "self_hosted_agent_sandbox", "core.py"))
 m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 d = tempfile.mkdtemp()
 log = os.path.join(d, "calls.log")

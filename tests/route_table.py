@@ -1,7 +1,7 @@
 """Router table: which commands may run on the host. Offline, no cluster needed.
 Run: python tests/route_table.py (no cluster, no dependencies)"""
 import importlib.util, os, sys, tempfile, types
-spec = importlib.util.spec_from_file_location("e", os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src", "agent_sandbox", "core.py"))
+spec = importlib.util.spec_from_file_location("e", os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src", "self_hosted_agent_sandbox", "core.py"))
 m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 E = m.Sandbox.__new__(m.Sandbox)
 E._host_cmds = m._DEFAULT_HOST_CMDS + ("mycli", "gh pr view", "gh pr create")
