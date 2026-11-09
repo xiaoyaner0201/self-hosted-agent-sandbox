@@ -14,6 +14,10 @@ else
   (cd "$work" && sha512sum -c runsc.sha512 containerd-shim-runsc-v1.sha512)
 fi
 install -m 0755 "$(find "$work" -name runsc -type f | head -1)" "$(find "$work" -name containerd-shim-runsc-v1 -type f | head -1)" /usr/local/bin/
+# Newer runsc releases spawn helper binaries (gvisor_sentry, ...) from gvisor-bin/ next to runsc;
+# without them every gVisor pod fails with: sidecar "gvisor_sentry" not usable.
+helpers=$(find "$work" -type d -name gvisor-bin | head -1)
+if [ -n "$helpers" ]; then mkdir -p /usr/local/bin/gvisor-bin && cp -a "$helpers/." /usr/local/bin/gvisor-bin/; fi
 runsc --version | head -1
 d=/var/lib/rancher/k3s/agent/etc/containerd/config-v3.toml.d
 mkdir -p "$d"
