@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.4.0rc1 — private prerelease
+## 0.4.0rc1 — prerelease
 
 - Add recoverable `Allocation` snapshots, `on_allocation` acquisition callbacks,
   `ReleaseError`, and opt-in `release_verified()` / `release_allocation()` APIs.
@@ -25,8 +25,9 @@
 - **Not verified:** new-API Kubernetes/gVisor/Temporal live canaries, remote physical
   process death, durable recovery across workers, or production rollout. Verified
   cleanup may require additional observer permissions; RBAC is not silently enlarged.
-- Distribution is a private Gitea prerelease only, not a PyPI/GitHub publication
-  or production upgrade. See [release notes](docs/releases/0.4.0rc1.md).
+- Distribution is a GitHub/Gitea prerelease, not a PyPI publication or production
+  upgrade. The original private candidate remains archived separately; public
+  tag `v0.4.0rc1` and its assets are immutable. See [release notes](docs/releases/0.4.0rc1.md).
 
 ## 0.3.0
 
