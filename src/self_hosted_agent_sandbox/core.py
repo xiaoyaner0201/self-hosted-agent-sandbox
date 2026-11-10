@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import contextlib
 import fnmatch
+import hashlib
 import io
 import json
 import logging
@@ -51,6 +52,27 @@ import threading
 import time
 import uuid
 from pathlib import Path
+from typing import NamedTuple
+from urllib.parse import quote
+
+
+class Allocation(NamedTuple):
+    """Immutable, JSON-friendly cleanup target; credentials are deliberately excluded."""
+    namespace: str
+    claim: str
+    claim_uid: str = ""
+    sandbox: str = ""
+    sandbox_uid: str = ""
+    pod: str = ""
+    pod_uid: str = ""
+    inventoried: bool = False
+
+
+class ReleaseError(RuntimeError):
+    """Cleanup is NOT verified. Retain allocation and retry after resolving the cause."""
+    def __init__(self, message: str, allocation: Allocation):
+        super().__init__(message)
+        self.allocation = allocation
 
 logger = logging.getLogger(__name__)
 
@@ -330,7 +352,7 @@ def _inside(path: str, roots: list) -> bool:
 
 def _safe_makedirs(path: str, roots: list) -> bool:
     """mkdir -p that never creates or enters anything outside ``roots``: walks down from the
-    root, refusing any existing component that is a symlink or not a directory."""
+    root. Symlinks are protected skips; ordinary type conflicts must fail receipt."""
     path = os.path.abspath(path)
     root = next((r for r in roots if path == r or path.startswith(r.rstrip("/") + "/")), None)
     if root is None or not _inside(root, [root]):
@@ -345,8 +367,10 @@ def _safe_makedirs(path: str, roots: list) -> bool:
                 os.mkdir(cur)
             except FileExistsError:
                 pass
-        if os.path.islink(cur) or not os.path.isdir(cur):
+        if os.path.islink(cur):
             return False
+        if not os.path.isdir(cur):
+            raise NotADirectoryError(f"agent-sandbox: pull-back directory conflicts with host path: {cur}")
     return _inside(path, roots)
 
 
@@ -381,7 +405,7 @@ class Sandbox:
 
     def __init__(self, *, cwd: str = "", timeout: int = 600, session: str = "default",
                  config: dict | None = None, app: str = "agent-sandbox",
-                 seed_dirs: tuple = (), extra_env_skip: tuple = ()):
+                 seed_dirs: tuple = (), extra_env_skip: tuple = (), on_allocation=None):
         cc = config or {}
         self._kubectl = str(_cfg(cc, "agent_sandbox_kubectl", "AGENT_SANDBOX_KUBECTL", "kubectl"))
         self._kubeconfig = str(_cfg(cc, "agent_sandbox_kubeconfig", "AGENT_SANDBOX_KUBECONFIG",
@@ -392,6 +416,9 @@ class Sandbox:
         # Default: one sandbox per session, deleted at close.
         self._persistent = str(_cfg(cc, "agent_sandbox_persistent", "AGENT_SANDBOX_PERSISTENT",
                                     False)).lower() in ("true", "1", "yes")
+        self._strict_pull = str(_cfg(cc, "agent_sandbox_strict_pull", "AGENT_SANDBOX_STRICT_PULL",
+                                    False)).lower() in ("true", "1", "yes")
+        self._pull_pending = False
         # Cluster-side backstop: the claim expires unless renewed by activity (host crash, OOM, kill -9).
         self._idle_ttl = int(_cfg(cc, "agent_sandbox_idle_ttl", "AGENT_SANDBOX_IDLE_TTL", 1800))
         self._ttl_renewed = 0.0
@@ -424,6 +451,16 @@ class Sandbox:
         self._claim = None
         self._pod = None
         self._env_digest = None
+        self._allocation: Allocation | None = None
+        self._on_allocation = on_allocation
+        try:
+            self._initialize()
+        except BaseException as error:
+            # Preserve the original error type/cause, but never lose a possible allocation.
+            setattr(error, "allocation", self._allocation)
+            raise
+
+    def _initialize(self) -> None:
         self._acquire()
         self._remote_home = (self._exec_simple("printf %s \"$HOME\"") or "/root").strip() or "/root"
         self._exec_simple(f"mkdir -p {_STATE_DIR} && chmod 700 {_STATE_DIR} && : > {_ENV_FILE}; "
@@ -442,7 +479,7 @@ class Sandbox:
     def _k(self, *args: str) -> list[str]:
         return [self._kubectl, "--kubeconfig", self._kubeconfig, "-n", self._ns, *args]
 
-    def _run_k(self, *args: str, inp: str | None = None, timeout: int = 60) -> subprocess.CompletedProcess:
+    def _run_k(self, *args: str, inp: str | None = None, timeout: float = 60) -> subprocess.CompletedProcess:
         return subprocess.run(self._k(*args), input=inp, capture_output=True, text=True, timeout=timeout)
 
     def _exec_argv(self, *argv: str, stdin: bool = False) -> list[str]:
@@ -457,6 +494,17 @@ class Sandbox:
         return r.stdout.decode(errors="replace")
 
     # ---- claim lifecycle --------------------------------------------------
+    @property
+    def allocation(self) -> Allocation | None:
+        """Latest immutable target, retained even after legacy close()."""
+        return self._allocation
+
+    def _observe_allocation(self, allocation: Allocation) -> None:
+        self._allocation = allocation
+        if self._on_allocation is not None:
+            # An equal snapshot may follow a failed persistence callback; retry it too.
+            self._on_allocation(allocation)
+
     def _find_existing_claim(self) -> str | None:
         r = self._run_k("get", "sandboxclaims", "-l", f"agent-sandbox/session={self._task_label}", "-o", "json")
         if r.returncode != 0:
@@ -494,13 +542,20 @@ class Sandbox:
                 "metadata": {"name": name, "labels": {"agent-sandbox/session": self._task_label, "agent-sandbox/app": self._app[:63]}},
                 "spec": {"warmPoolRef": {"name": self._pool}, "lifecycle": self._lifecycle()},
             }
+            self._observe_allocation(Allocation(self._ns, name))  # before ambiguous apply outcome
             r = self._run_k("apply", "-f", "-", inp=json.dumps(manifest))
             if r.returncode != 0:
                 raise RuntimeError(f"agent-sandbox: claim create failed: {r.stderr.strip()[:300]}")
+        if self._allocation is None:
+            self._observe_allocation(Allocation(self._ns, name))
         t0 = time.monotonic()
         while time.monotonic() - t0 < self._claim_timeout:
             r = self._run_k("get", "sandboxclaim", name, "-o", "json")
-            st = json.loads(r.stdout or "{}").get("status", {}) if r.returncode == 0 else {}
+            obj = json.loads(r.stdout or "{}") if r.returncode == 0 else {}
+            st = obj.get("status", {})
+            self._observe_allocation(self._allocation._replace(
+                claim_uid=obj.get("metadata", {}).get("uid", self._allocation.claim_uid),
+                sandbox=st.get("sandbox", {}).get("name", self._allocation.sandbox)))
             if any(c.get("type") == "Ready" and c.get("status") == "True" for c in st.get("conditions", [])):
                 self._claim, self._pod = name, st["sandbox"]["name"]
                 self._ttl_renewed = time.monotonic()
@@ -598,7 +653,11 @@ class Sandbox:
 
     # ---- code: sandbox -> host after each command ------------------------
     def _pull_code(self) -> tuple[int, int]:
-        """Pull files the sandbox changed since the last mark; mirror sandbox deletions."""
+        """Validate and apply a delta before acknowledging its remote watermark.
+
+        A failed attempt leaves the old mark and is retried before the next host push.
+        Commands on a Sandbox instance must be serialized by the caller.
+        """
         if not self._code_dirs or self._pod is None:
             return (0, 0)
         dirs = " ".join(shlex.quote(d) for d in self._code_dirs if os.path.isdir(d))
@@ -606,21 +665,40 @@ class Sandbox:
             return (0, 0)
         prune = " -o ".join(f"-name {shlex.quote(n)}" for n in sorted(_CODE_SKIP_DIRS))
         find = f"find {dirs} -type d \\( {prune} \\) -prune -o -type f"
-        script = (f"set -e; touch {_MARK_FILE}.new; cd /; "
+        self._pull_pending = True
+        next_mark = f"{_MARK_FILE}.new"
+        script = (f"set -e; touch {next_mark}; cd /; "
                   f"{find} -print0 2>/dev/null > {_STATE_DIR}/all; "
                   f"{{ {find} -newer {_MARK_FILE} -print0; find {dirs} -type d \\( {prune} \\) -prune -o -type d -empty -print0; }} "
                   f"2>/dev/null > {_STATE_DIR}/changed; "
-                  f"tar cf {_STATE_DIR}/changed.tar --no-recursion --null -T {_STATE_DIR}/changed 2>/dev/null || true; "
-                  f"mv -f {_MARK_FILE}.new {_MARK_FILE}; "
-                  f"tar cf - -C {_STATE_DIR} all changed.tar")
+                  f"tar cf {_STATE_DIR}/changed.tar --no-recursion --null -T {_STATE_DIR}/changed; "
+                  f"cd {_STATE_DIR}; sha256sum -b all changed.tar > checksums; "
+                  f"tar cf - all changed.tar checksums")
         r = subprocess.run(self._exec_argv("bash", "-c", script), capture_output=True, timeout=300)
         if r.returncode != 0:
             raise RuntimeError(f"pull-back failed rc={r.returncode}: {r.stderr.decode(errors='replace')[:200]}")
-        outer = tarfile.open(fileobj=io.BytesIO(r.stdout), mode="r:")
-        remote_all = set(filter(None, outer.extractfile("all").read().decode(errors="surrogateescape").split("\0")))
+        # tarfile accepts missing EOF blocks, so require a final manifest and validate
+        # both payloads before any host write/deletion (including record-aligned cuts).
+        with tarfile.open(fileobj=io.BytesIO(r.stdout), mode="r:") as outer:
+            members = outer.getmembers()
+            if [x.name for x in members] != ["all", "changed.tar", "checksums"] or not all(x.isfile() for x in members):
+                raise RuntimeError("pull-back incomplete envelope")
+            payloads = {}
+            for member in members:
+                stream = outer.extractfile(member)
+                if stream is None:
+                    raise RuntimeError("pull-back missing envelope member")
+                payloads[member.name] = stream.read()
+        expected = "".join(hashlib.sha256(payloads[n]).hexdigest() + " *" + n + "\n"
+                           for n in ("all", "changed.tar")).encode("ascii")
+        if payloads["checksums"] != expected:
+            raise RuntimeError("pull-back checksum mismatch")
+        all_bytes = payloads["all"]
+        if all_bytes and not all_bytes.endswith(b"\0"):
+            raise RuntimeError("pull-back incomplete file list")
+        remote_all = set(filter(None, all_bytes.decode(errors="surrogateescape").split("\0")))
         written = 0
-        inner_f = outer.extractfile("changed.tar")
-        inner_bytes = inner_f.read() if inner_f else b""
+        inner_bytes = payloads["changed.tar"]
         if inner_bytes:
             with tarfile.open(fileobj=io.BytesIO(inner_bytes), mode="r:") as tar:
                 for m in tar.getmembers():
@@ -659,9 +737,21 @@ class Sandbox:
                     os.unlink(host)
                     deleted += 1
                     gone.append(host)
-                except OSError:
+                except FileNotFoundError:
                     pass
                 synced.pop(host, None)
+        # A caller may resolve a file->directory conflict before retrying receipt.
+        # Retire that old file entry too, or the next push tries rm -f on the
+        # remote directory even after its children were received successfully.
+        for host in list(synced):
+            if (host not in remote_all and os.path.isdir(host) and not os.path.islink(host)
+                    and any(host.startswith(d + "/") for d in self._code_dirs if os.path.isdir(d))
+                    and not _git_protected(host, True)):
+                synced.pop(host, None)
+        # The timestamp was captured BEFORE scanning, never after host receipt. If
+        # this acknowledgement is lost, host data is already applied; retry is safe.
+        self._exec_simple(f"mv -f {next_mark} {_MARK_FILE}")
+        self._pull_pending = False
         if (written or deleted) and self._file_sync is not None:
             for host, _ in self._code_files():  # pulled state = synced state (no bounce back)
                 k = _mtime_key(host)
@@ -714,11 +804,26 @@ class Sandbox:
         self._env_digest = digest
 
     # ---- per-command hooks (adapters with their own shell flow call these) ------
+    def pull(self) -> tuple[int, int]:
+        """Receive pending code edits without rerunning a command or pushing host files.
+
+        Returns (written, deleted). Always raises on failure, independent of strict_pull.
+        """
+        return self._pull_code()
+
     def before_command(self) -> None:
         """Push changed files and env; call right before running a command in the sandbox."""
+        if getattr(self, "_pull_pending", False):
+            # Never force-push a stale host copy over an unreceived remote edit.
+            # Recovery failure blocks this command even in best-effort mode.
+            self._pull_code()
         if self._file_sync is not None:
             self._file_sync.sync(force=True)
         self._push_env()
+        # Reserve receipt before handing control to a command/adapter. Output sinks,
+        # timeouts and callbacks can raise before execute() reaches its normal pull.
+        if getattr(self, "_code_dirs", ()):
+            self._pull_pending = True
 
     @staticmethod
     def env_prefix() -> str:
@@ -760,17 +865,26 @@ class Sandbox:
                     os.killpg(p.pid, 9)  # stop the command rather than run it with nobody listening
         t = threading.Thread(target=_copy, daemon=True)
         t.start()
-        try:
-            rc = p.wait(timeout=timeout)  # the deadline holds even while output keeps coming
-        except subprocess.TimeoutExpired:
+        def reap_group():
+            # Even an exited group leader may have living children holding the output pipe.
             try:
-                os.killpg(p.pid, 9)  # kubectl and anything it spawned locally, so the pipe closes
+                os.killpg(p.pid, 9)
             except (OSError, AttributeError):
-                p.kill()
-            p.wait()
-            t.join(5)
+                if p.poll() is None:
+                    p.kill()
+            p.wait(timeout=5)
+
+        try:
+            rc = p.wait(timeout=timeout)  # deadline holds while output keeps coming
+            reap_group()
+            t.join()  # normal slow writers still drain completely (not a writer deadline)
+        except BaseException:  # timeout, KeyboardInterrupt, caller cancellation, drain failure
+            with contextlib.suppress(Exception):
+                reap_group()
+            t.join(5)  # cannot interrupt arbitrary user write(); do not wait forever here
+            if not t.is_alive():
+                p.stdout.close()
             raise
-        t.join()  # the command is done only when its output is: a slow writer delays, never drops
         p.stdout.close()
         if failure:
             raise failure[0]
@@ -933,6 +1047,8 @@ class Sandbox:
         new = [d for d in _task_dirs(cwd, self._task_files) if d not in self._code_dirs]
         if not new:
             return
+        if self._pull_pending:
+            self._pull_code()  # adoption must not reset the mark past an unreceived delta
         self._code_dirs.extend(new)
         self._reset_remote_dirs(new)
         self._exec_simple(f"touch {_MARK_FILE}")
@@ -944,8 +1060,13 @@ class Sandbox:
                 run_in_sandbox=None, stream=None) -> dict:
         """Run ``command``: on the host when it is a confined host command, else in the sandbox
         (via ``run_in_sandbox(command, cwd, timeout)`` when an adapter has its own shell flow).
-        Returns {"output", "returncode"}; with ``stream`` (a file object) output goes there."""
+        Returns {"output", "returncode"}; with ``stream`` (a file object) output goes there.
+        With agent_sandbox_strict_pull, failed post-command receipt raises RuntimeError;
+        the command may already have run. Use pull() to retry receipt, not the command.
+        """
         self._renew_ttl()
+        if self._pull_pending:
+            self._pull_code()
         self._ensure_code_dirs(cwd or self.cwd)
         for m in _TASK_PATH_RE.finditer(command):  # absolute task paths used by file tools
             self._ensure_code_dirs(m.group(0))
@@ -968,22 +1089,188 @@ class Sandbox:
                     stream.write((p.stdout + p.stderr).encode())  # binary stream, like the sandbox path
                     return {"output": "", "returncode": p.returncode}
                 return {"output": p.stdout + p.stderr, "returncode": p.returncode}
-            if run_in_sandbox is not None:
-                result = run_in_sandbox(command, cwd or self.cwd, timeout or self.timeout)
-            else:
-                result = self._default_run(command, cwd or self.cwd, timeout or self.timeout, stream)
+            try:
+                if run_in_sandbox is not None:
+                    result = run_in_sandbox(command, cwd or self.cwd, timeout or self.timeout)
+                else:
+                    result = self._default_run(command, cwd or self.cwd, timeout or self.timeout, stream)
+            except BaseException:
+                # Also cover callbacks that don't use before_command(). Preserve the
+                # original command error; the next command must receive, not rerun it.
+                if self._code_dirs:
+                    self._pull_pending = True
+                raise
         finally:
             done.set()
         try:
             self._pull_code()
         except Exception as e:
+            if self._strict_pull:
+                raise RuntimeError("agent-sandbox: code pull-back failed; command may have completed; "
+                                   "retry pull-back before rerunning side effects") from e
             logger.warning("agent-sandbox: code pull-back failed: %s", e)
         return result
+
+    def release_verified(self, *, timeout: float = 30, poll_interval: float = 0.2) -> Allocation:
+        """Delete this exact allocation and verify claim, Sandbox and Pod absence.
+
+        Destructive: no artifact pull. Stop execute/acquire/renew owners first. Unlike close(),
+        this ignores persistence and needs get permission on Sandbox CRs. Raises ReleaseError
+        with the latest retry target on ANY unverified outcome; never clears that target.
+        """
+        import math
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError("timeout must be finite and positive")
+        end = time.monotonic() + timeout
+        if not self._lock.acquire(timeout=timeout):
+            if self._allocation is None:
+                raise ValueError("no allocation observed")
+            raise ReleaseError("agent-sandbox: release lock deadline exceeded", self._allocation)
+        try:
+            if self._allocation is None:
+                raise ValueError("no allocation observed")
+            left = end - time.monotonic()
+            if left <= 0:
+                raise ReleaseError("agent-sandbox: release deadline exceeded", self._allocation)
+            try:
+                target = type(self).release_allocation(
+                    self._allocation,
+                    config={"agent_sandbox_kubectl": self._kubectl,
+                            "agent_sandbox_kubeconfig": self._kubeconfig},
+                    timeout=left, poll_interval=poll_interval,
+                    on_allocation=self._observe_allocation)
+            except ReleaseError as error:
+                self._allocation = error.allocation
+                raise
+            self._claim = self._pod = None
+            return target
+        finally:
+            self._lock.release()
+
+    @classmethod
+    def release_allocation(cls, allocation: Allocation, *, config: dict | None = None,
+                           timeout: float = 30, poll_interval: float = 0.2,
+                           on_allocation=None) -> Allocation:
+        """Recover/verify an observed target without constructing or claiming a sandbox.
+
+        timeout is one shared monotonic budget for inventory, delete and all read-backs.
+        Callbacks run synchronously outside the subprocess timeout guarantee; persist the
+        inventoried snapshot before delete. Incomplete inventory fails closed (use a reaper).
+        """
+        import math
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError("timeout must be finite and positive")
+        if not math.isfinite(poll_interval) or poll_interval <= 0:
+            raise ValueError("poll_interval must be finite and positive")
+        if not allocation.namespace or not allocation.claim:
+            raise ValueError("allocation needs namespace and claim")
+        sb = cls.__new__(cls)
+        cc = config or {}
+        sb._kubectl = str(_cfg(cc, "agent_sandbox_kubectl", "AGENT_SANDBOX_KUBECTL", "kubectl"))
+        sb._kubeconfig = str(_cfg(cc, "agent_sandbox_kubeconfig", "AGENT_SANDBOX_KUBECONFIG",
+                                  str(Path.home() / ".kube" / "agent-sandbox.yaml")))
+        sb._ns = allocation.namespace  # never use a different configured namespace
+        target = allocation
+        end = time.monotonic() + timeout
+
+        def remaining():
+            left = end - time.monotonic()
+            if left <= 0:
+                raise TimeoutError("verified release deadline exceeded")
+            return left
+
+        def observe(**fields):
+            nonlocal target
+            updated = target._replace(**fields)
+            if updated != target:
+                target = updated
+                if on_allocation is not None:
+                    on_allocation(target)
+
+        def run(*args, **kwargs):
+            result = sb._run_k(*args, timeout=remaining(), **kwargs)
+            remaining()
+            if result.returncode:
+                raise RuntimeError(f"kubectl {args[0]} failed: {result.stderr.strip()[:300]}")
+            return result
+
+        def get(kind, name, uid=""):
+            result = run("get", kind, name, "--ignore-not-found", "-o", "json")
+            if not result.stdout.strip():
+                return None
+            obj = json.loads(result.stdout)
+            meta = obj.get("metadata", {})
+            if (meta.get("name") != name or meta.get("namespace") != target.namespace
+                    or not meta.get("uid")):
+                raise RuntimeError(f"invalid identity for {kind}/{name}")
+            if uid and meta["uid"] != uid:
+                raise RuntimeError(f"UID changed for {kind}/{name}; refusing name reuse")
+            return obj
+
+        try:
+            claim = get("sandboxclaims.extensions.agents.x-k8s.io", target.claim, target.claim_uid)
+            if claim is not None:
+                observe(claim_uid=claim["metadata"]["uid"])
+                bound = claim.get("status", {}).get("sandbox", {}).get("name", "")
+                if target.sandbox and bound != target.sandbox:
+                    raise RuntimeError("claim binding changed or disappeared")
+                if bound:
+                    observe(sandbox=bound)
+            if not target.claim_uid or not target.sandbox:
+                raise RuntimeError("claim identity/binding unknown; reaper inventory required")
+            if not target.inventoried:
+                sandbox = get("sandboxes.agents.x-k8s.io", target.sandbox, target.sandbox_uid)
+                if sandbox is None:
+                    raise RuntimeError("Sandbox absent before inventory; Pod identity unknown")
+                pod = sandbox["metadata"].get("annotations", {}).get(
+                    "agents.x-k8s.io/pod-name", target.sandbox)
+                if target.pod and target.pod != pod:
+                    raise RuntimeError("Sandbox Pod binding changed")
+                observe(sandbox_uid=sandbox["metadata"]["uid"], pod=pod)
+                pod_obj = get("pods", target.pod, target.pod_uid)
+                if pod_obj is None:
+                    raise RuntimeError("Pod absent before inventory; retry or use reaper")
+                observe(pod_uid=pod_obj["metadata"]["uid"], inventoried=True)
+            if not all((target.sandbox_uid, target.pod, target.pod_uid)):
+                raise RuntimeError("incomplete inventory")
+            # Observation (including inventoried=True) is not a persistence receipt.
+            # Reconfirm the complete target on every attempt, even an unchanged retry.
+            if on_allocation is not None:
+                on_allocation(target)
+            # Read all targets before delete, including on recovery of an inventoried ledger.
+            get("sandboxes.agents.x-k8s.io", target.sandbox, target.sandbox_uid)
+            get("pods", target.pod, target.pod_uid)
+            if claim is not None:
+                path = (f"/apis/{_CLAIM_API}/namespaces/{quote(target.namespace, safe='')}/"
+                        f"sandboxclaims/{quote(target.claim, safe='')}")
+                preconditions = {"uid": target.claim_uid}
+                if claim["metadata"].get("resourceVersion"):
+                    preconditions["resourceVersion"] = claim["metadata"]["resourceVersion"]
+                options = {"apiVersion": "v1", "kind": "DeleteOptions",
+                           "propagationPolicy": "Foreground", "preconditions": preconditions}
+                run("delete", "--raw=" + path, "-f", "-", inp=json.dumps(options))
+            while True:
+                present = []
+                for kind, name, uid in (
+                    ("sandboxclaims.extensions.agents.x-k8s.io", target.claim, target.claim_uid),
+                    ("sandboxes.agents.x-k8s.io", target.sandbox, target.sandbox_uid),
+                    ("pods", target.pod, target.pod_uid),
+                ):
+                    if get(kind, name, uid) is not None:
+                        present.append(f"{kind}/{name}")
+                if not present:
+                    return target
+                time.sleep(min(poll_interval, remaining()))
+        except BaseException as error:
+            if not isinstance(error, Exception):
+                setattr(error, "allocation", target)
+                raise  # do not replace caller cancellation/KeyboardInterrupt
+            raise ReleaseError(f"agent-sandbox: release not verified: {error}", target) from error
 
     @classmethod
     def release(cls, session: str, *, config: dict | None = None) -> int:
         """Delete every claim kept for ``session`` (persistent mode) without claiming a new one.
-        Returns how many claims were deleted."""
+        Returns how many delete requests were accepted, not confirmed reclamations."""
         sb = cls.__new__(cls)
         cc = config or {}
         sb._kubectl = str(_cfg(cc, "agent_sandbox_kubectl", "AGENT_SANDBOX_KUBECTL", "kubectl"))
@@ -1012,6 +1299,8 @@ class Sandbox:
             try:
                 self._pull_code()
             except Exception as e:
+                if self._strict_pull:
+                    raise  # keep the claim available for a retry, subject to its idle TTL
                 logger.warning("agent-sandbox: final pull-back failed: %s", e)
             if force_remove or not self._persistent:
                 r = self._run_k("delete", "sandboxclaim", self._claim, "--wait=false")
