@@ -49,7 +49,7 @@ The SDK owns command routing, local subprocess cleanup and file transfer. The co
 | Claude Code | built-in Bash/Read/Write/Edit replaced by MCP tools backed by the sandbox | 🛠️ planned |
 | Codex CLI | native remote execution environment (`codex exec-server` in the sandbox), MCP as fallback | 🛠️ planned |
 | Multica runtimes | through the agent adapters above; covers assigned issues, webhook autopilots (e.g. on `pull_request`) and PR wakeups | 🛠️ planned |
-| [OmniRoute](https://github.com/cheaper-inference/OmniRoute) | `agent-sandbox` skill runtime: `execute_command` / `eval_code` claim a pod from the pool ([guide](docs/omniroute.md)) | 🔄 upstream PR [#19130](https://github.com/cheaper-inference/OmniRoute/pull/19130) open, not merged; verified on a lab cluster |
+| [OmniRoute](https://github.com/cheaper-inference/OmniRoute) | `agent-sandbox` skill runtime: `execute_command` / `eval_code` claim a pod from the pool ([guide](docs/omniroute.md)) | ✅ upstream PR [#19130](https://github.com/cheaper-inference/OmniRoute/pull/19130) merged; verified on a lab cluster |
 | [Temporal](https://temporal.io) | Activity calls the Python `Sandbox` API: claim → exec → verified cleanup ([guide](docs/temporal.md)) | 🧪 consumer-owned adapter candidate; isolated SDK 0.3.0 canary recorded, not bundled here or switched to production |
 
 Anything else can call the CLI or the library directly.

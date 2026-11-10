@@ -49,7 +49,7 @@ SDK 负责命令分流、本地子进程清理和文件传输；controller 负�
 | Claude Code | 用沙箱提供的 MCP 工具替换自带的 Bash/Read/Write/Edit | 🛠️ 计划中 |
 | Codex CLI | 官方远端执行环境（沙箱里跑 `codex exec-server`），备选 MCP | 🛠️ 计划中 |
 | Multica 运行时 | 经上面几个 Agent 适配接入；覆盖分配任务、Webhook 自动化（如 `pull_request`）和 PR 唤醒 | 🛠️ 计划中 |
-| [OmniRoute](https://github.com/cheaper-inference/OmniRoute) | 技能运行时 `agent-sandbox`：`execute_command` / `eval_code` 从预热池领 Pod 执行（[接入说明](docs/omniroute.md)） | 🔄 上游 PR [#19130](https://github.com/cheaper-inference/OmniRoute/pull/19130) 已提交、未合并；实验集群已验证 |
+| [OmniRoute](https://github.com/cheaper-inference/OmniRoute) | 技能运行时 `agent-sandbox`：`execute_command` / `eval_code` 从预热池领 Pod 执行（[接入说明](docs/omniroute.md)） | ✅ 上游 PR [#19130](https://github.com/cheaper-inference/OmniRoute/pull/19130) 已合并；实验集群已验证 |
 | [Temporal](https://temporal.io) | Activity 调用 Python `Sandbox` API：claim → exec → 验证回收（[接入说明](docs/temporal.zh-CN.md)） | 🧪 调用方维护的适配候选；有 SDK 0.3.0 隔离 canary 记录，本仓库未内置、未切生产 |
 
 其他程序可以直接调命令行或核心库。
