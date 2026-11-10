@@ -3,7 +3,7 @@
 [OmniRoute](https://github.com/cheaper-inference/OmniRoute) runs its `execute_command` and `eval_code` skills through a pluggable container runtime. The `agent-sandbox` runtime sends each run to a warm pool of this cluster instead of a local container.
 
 > [!NOTE]
-> Status: proposed upstream in [OmniRoute#19129](https://github.com/cheaper-inference/OmniRoute/issues/19129) / [PR #19130](https://github.com/cheaper-inference/OmniRoute/pull/19130), **not merged yet**. Until it ships in an OmniRoute release you need a build from that branch.
+> Status: [PR #19130](https://github.com/cheaper-inference/OmniRoute/pull/19130) is **merged upstream** ([tracking issue](https://github.com/cheaper-inference/OmniRoute/issues/19129)). Use an OmniRoute build containing that merge; release inclusion and your deployed configuration must be checked separately.
 
 This adapter does not use the Python core or `sbx`: OmniRoute talks to the cluster with `kubectl` directly. Each skill run is short and stateless, so there is no code sync and no host-command routing — the command, its stdout/stderr and its exit code are all that cross over.
 
@@ -44,7 +44,7 @@ Against a kind cluster with agent-sandbox v1.0.9 and gVisor, calling OmniRoute's
 [OmniRoute](https://github.com/cheaper-inference/OmniRoute) 的 `execute_command`、`eval_code` 技能通过可替换的容器运行时执行。`agent-sandbox` 运行时把每次执行发到本集群的预热池，而不是起本机容器。
 
 > [!NOTE]
-> 状态：已向上游提交 [OmniRoute#19129](https://github.com/cheaper-inference/OmniRoute/issues/19129) / [PR #19130](https://github.com/cheaper-inference/OmniRoute/pull/19130)，**尚未合并**。正式发版前需要用该分支构建。
+> 状态：[PR #19130](https://github.com/cheaper-inference/OmniRoute/pull/19130) **已合并上游**（[跟踪 Issue](https://github.com/cheaper-inference/OmniRoute/issues/19129)）。需使用包含该 merge 的 OmniRoute 构建；正式版本是否包含、部署配置是否启用仍须单独核对。
 
 这个适配不用 Python 核心库和 `sbx`，OmniRoute 直接用 `kubectl` 访问集群。技能调用短小、无状态，所以没有代码同步和回宿主执行，只传命令、输出和退出码。
 
