@@ -12,7 +12,7 @@
 
 ---
 
-Agent 原来跑在哪台机器上，接入后还跑在那里，只有 **它执行的命令** 进沙箱。每个会话一个沙箱，从预热池领用约 0.2 秒，会话结束就删除。任务代码双向同步，原机器上的工作目录始终是 git 正本；`push`、`fetch`、`clone` 这类 git 联网命令回原机器执行，凭据就在那里。
+Agent 原来跑在哪台机器上，接入后还跑在那里，只有 **它执行的命令** 进沙箱。每个会话一个沙箱，从预热池领用约 0.2 秒，会话结束请求删除（controller 异步回收）。任务代码双向同步，原机器上的工作目录始终是 git 正本；`push`、`fetch`、`clone` 这类 git 联网命令回原机器执行，凭据就在那里。
 
 底层用的是 [k3s](https://k3s.io)、[kubernetes-sigs/agent-sandbox](https://github.com/kubernetes-sigs/agent-sandbox) 和 [gVisor](https://gvisor.dev)。不需要 KVM，普通云主机就能部署。
 
@@ -24,6 +24,23 @@ Agent 原来跑在哪台机器上，接入后还跑在那里，只有 **它执�
 | `src/self_hosted_agent_sandbox/` | 核心库（`Sandbox`）：领用、续期、释放，环境变量和文件同步，带 `.git` 白名单的代码双向同步，哪些命令回原机器执行。纯 Python，无依赖 |
 | `sbx` | 基于核心库的命令行：`sbx exec`、`sbx shell`、`sbx release` |
 
+这个通用底座的正式入口是 **Python `Sandbox` API** 和 `sbx` CLI；SDK 0.4.0rc1 **没有 HTTP server 或持久作业服务**。调用方负责业务编排、取消和回收验证；Kubernetes 是底层平台，不意味着每个调用方都应再造一套 Job backend。
+
+**0.4.0rc1 预发布：** 本树包含公共 allocation/verified-release API 与 ACK/strict 回传。PyPI 稳定基线仍为 0.3.0；需从 [GitHub 预发布](https://github.com/xiaoyaner0201/self-hosted-agent-sandbox/releases/tag/v0.4.0rc1)显式安装 RC，普通 PyPI 升级不会获得这些新增 API。源码和非 editable wheel 的本地门禁已过；不据此声称新 API 已完成 Kubernetes/gVisor/Temporal 实机验收。下方 Temporal canary 仅运行过历史 0.3.0。见[发行说明](docs/releases/0.4.0rc1.md)。
+
+```text
+Agent / 适配层（原主机）：编排、凭据、持久 allocation 账本
+       | Python Sandbox API / sbx
+       | Kubernetes API + exec 隧道（原主机主动连接）
+       v
+agent-sandbox controller -> 预热池 -> 非 root gVisor Pod
+       ^                                  |
+       | 显式 UID 感知回收验证             | 白名单代码回传 + ACK
+       +----------------------------------+
+```
+
+SDK 负责命令分流、本地子进程清理和文件传输；controller 负责调度/到期，适配层负责持久恢复、取消策略和制品验证。API 资源消失、远端进程死亡、制品收妥是不同结论。
+
 ## 🔌 适配
 
 | Agent / 平台 | 接法 | 状态 |
@@ -33,6 +50,7 @@ Agent 原来跑在哪台机器上，接入后还跑在那里，只有 **它执�
 | Codex CLI | 官方远端执行环境（沙箱里跑 `codex exec-server`），备选 MCP | 🛠️ 计划中 |
 | Multica 运行时 | 经上面几个 Agent 适配接入；覆盖分配任务、Webhook 自动化（如 `pull_request`）和 PR 唤醒 | 🛠️ 计划中 |
 | [OmniRoute](https://github.com/cheaper-inference/OmniRoute) | 技能运行时 `agent-sandbox`：`execute_command` / `eval_code` 从预热池领 Pod 执行（[接入说明](docs/omniroute.md)） | 🔄 上游 PR [#19130](https://github.com/cheaper-inference/OmniRoute/pull/19130) 已提交、未合并；实验集群已验证 |
+| [Temporal](https://temporal.io) | Activity 调用 Python `Sandbox` API：claim → exec → 验证回收（[接入说明](docs/temporal.zh-CN.md)） | 🧪 调用方维护的适配候选；有 SDK 0.3.0 隔离 canary 记录，本仓库未内置、未切生产 |
 
 其他程序可以直接调命令行或核心库。
 
@@ -70,7 +88,7 @@ cluster/make-kubeconfig.sh https://10.0.0.11:6443 > agent-sandbox.kubeconfig   #
 **3. Agent 主机**
 
 ```bash
-pip install self-hosted-agent-sandbox
+pip install self-hosted-agent-sandbox==0.3.0
 export AGENT_SANDBOX_KUBECONFIG=$PWD/agent-sandbox.kubeconfig AGENT_SANDBOX_POOL=sbx-team-a
 cd /workspaces/my-repo
 sbx exec --session demo -- 'cat /proc/version; make test'     # 在新的 gVisor 沙箱里跑
@@ -79,14 +97,47 @@ sbx exec --session demo -- git push origin HEAD                # 在本机跑，
 
 加 `--keep` 会保留沙箱，之后的 `sbx exec --session demo --keep` 都用同一个，直到 `sbx release --session demo`。`PATH` 里要有 `kubectl`，或者用 `AGENT_SANDBOX_KUBECTL` 指定。
 
+上方命令安装稳定基线。下方新增 API 示例需要从预发布下载 `0.4.0rc1` wheel 和 `SHA256SUMS`，核验 SHA-256 后执行 `pip install ./self_hosted_agent_sandbox-0.4.0rc1-py3-none-any.whl`。
+
 在 Python 里用：
 
 ```python
 from self_hosted_agent_sandbox import Sandbox
 sb = Sandbox(cwd="/workspaces/my-repo", session="task-42")
 print(sb.execute("pytest -q")["output"])
-sb.close()
+sb.close()  # 兼容旧行为：只发起异步删除，不代表已回收
 ```
+
+公共 allocation 快照、构造失败恢复，以及对 Claim/Sandbox/Pod 做精确读回的有界释放，见 [生命周期归属](docs/lifecycle.md)。
+`close()` 和按 session 的 `release()` 保持原行为。
+
+## 显式生命周期与制品归属（RC）
+
+```python
+from self_hosted_agent_sandbox import Sandbox
+
+# save_target(Allocation) 由调用方实现：同步、原子、持久写入。
+# 保存 target._asdict()；用 Allocation(**saved_json) 恢复。
+sb = Sandbox(cwd="/workspaces/my-repo", session="attempt-unique-id",
+             on_allocation=save_target,
+             config={"agent_sandbox_strict_pull": True})
+result = sb.execute("make && mkdir -p out && cp dist/package.tar.gz out/package.tar.gz")
+if result["returncode"] != 0:
+    raise RuntimeError("build failed")
+# 此处在主机检查预期 out/package.tar.gz、大小及 hash。
+# 先停止/join 其他执行所有者，再显式回收（不会回传文件）：
+released = sb.release_verified(timeout=15)
+```
+
+上面只是成功路径，不是完整异常策略。回传失败时命令可能已执行：修好传输/磁盘，或显式移动/移除冲突的宿主文件/目录，再在**同一实例 `sb.pull()`**，不要重跑命令或重新构造。strict close 回传失败会保留 claim，`force_remove=True` 不能绕过；默认 close 仍是 best-effort/异步删除，可能丢弃未收制品。两种模式的 pending 回传都会阻止下一次旧宿主覆盖；类型冲突不会自动递归删除宿主树。
+
+持久保存 `error.allocation` / `ReleaseError.allocation`，用 `Sandbox.release_allocation(target, config=original_config, timeout=15)` 恢复回收，并单独保留最初的执行异常。verified release 需要显式授予 Sandbox CR 观察权限，inventory 不完整时 fail-closed；验证精确 API 名称/UID 消失，**不证明物理进程死亡**。见[完整生命周期合同](docs/lifecycle.md)。
+
+## 构建能力边界
+
+- 可运行沙箱镜像内已有的普通工具链；依赖、网络策略和资源额度由运维方配置。
+- 隔离环境中实测了 rootless BuildKit **COPY-only** OCI 导出，不代表通用容器构建已成立：Dockerfile **RUN** 仍受当前沙箱 namespace/mount/安全限制。不能宣称支持 Docker-in-Docker、特权构建、任意 Dockerfile 或镜像推送。
+- `dist`、`build`、`node_modules` 等[目录排除](docs/artifact-pull.md#directory-exclusions-and-explicit-export--目录排除与显式导出)不变。只将指定制品复制到代码目录内未排除的 `out/`；strict 回传不代替预期制品/hash 校验，也不是持久制品仓库。
 
 ## 🧭 哪些在沙箱，哪些在原机器
 
@@ -107,6 +158,7 @@ sb.close()
 | `AGENT_SANDBOX_KUBECTL` | `kubectl` | kubectl 路径 |
 | `AGENT_SANDBOX_SYNC_PATHS` | – | 按原路径推进沙箱的配置文件或目录 |
 | `AGENT_SANDBOX_CODE_DIRS` | 任务目录 | 双向同步的代码目录 |
+| `AGENT_SANDBOX_STRICT_PULL` | `false` | 回传失败时抛异常；严格 close 失败保留 claim 供重试。见[制品回传合同](docs/artifact-pull.md) |
 | `AGENT_SANDBOX_HOST_COMMANDS` | git 网络操作、`git remote add/set-url` | 回原机器执行的命令前缀，按词匹配（设置后替换默认列表） |
 | `AGENT_SANDBOX_FORWARD_ENV` | –（不转任何变量） | 要带进沙箱的主机变量，写变量名或通配，例如 `MY_BUILD_FLAG,NPM_CONFIG_REGISTRY`。不要把 token、key 写进来 |
 | `AGENT_SANDBOX_ENV_SKIP` | – | 即使白名单匹配也不带进沙箱的变量名，支持 `*_TOKEN` 这类通配 |
@@ -114,6 +166,8 @@ sb.close()
 | `AGENT_SANDBOX_IDLE_TTL` | `1800` | 集群侧到期时间（秒），有命令执行时自动续期 |
 | `AGENT_SANDBOX_PERSISTENT` | `false` | 同一会话标签复用同一个沙箱 |
 | `AGENT_SANDBOX_CLAIM_TIMEOUT` | `180` | 等沙箱就绪的最长秒数 |
+
+回传游标现在只在载荷校验和本地应用成功后确认；`sb.pull()` 可以只重试接收、不重跑命令。严格模式显式开启，默认命令结果仍是 best-effort。构建调用方必须把指定制品从排除的 `dist/build` 复制到代码目录内未排除的 `out/`，并检查预期文件及 hash，不会默认放开构建/依赖全目录同步。详见[协议、兼容与限制](docs/artifact-pull.md)。
 
 ## 🌐 网络白名单
 
@@ -157,6 +211,7 @@ sb.close()
 
 - `tests/route_table.py`（固定用例）和 `tests/route_fuzz.py`（随机生成命令交给真实 bash 执行，确认不会在代码目录外写文件）离线检查哪些命令回原机器执行：`python tests/route_table.py`。
 - `tests/core_unit.py` 用假的 `kubectl` 离线检查报错、流式输出、`release`、变量白名单（默认为空：主机上的 API key 不会进沙箱；去掉的变量会被 unset）和 git 配置白名单（主机和仓库两份）。
+- `tests/lifecycle_unit.py`（31）检查 fake kubectl 生命周期和真实本地 POSIX 进程组；`tests/artifact_pull.py`（11）、`tests/artifact_integrity.py`（10）、`tests/integration_cross.py`（5）使用真实 Docker 传输验证 ACK/恢复与交叉合同。源码和已安装 wheel 本地门禁已运行，不替代集群验收。
 - `tests/e2e.sh` 用真实集群测 `sbx` 命令行：gVisor、变量同步、文件和 commit 回传、回原机器执行、沙箱复用和释放、退出码。
 - 各适配仓库有自己的验收（Hermes：26 + 15 项端到端检查）。
 

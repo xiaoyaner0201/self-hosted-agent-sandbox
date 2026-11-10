@@ -12,7 +12,7 @@ English · [简体中文](README.zh-CN.md)
 
 ---
 
-The agent keeps running where it runs today. Only **the commands it executes** go into a sandbox: one per session, claimed from a warm pool in about 0.2 s and deleted when the session ends. The task's code is synced both ways, so the host's working tree stays the git source of truth, and git network commands (`push`, `fetch`, `clone`, …) run back on the host, where the credentials are.
+The agent keeps running where it runs today. Only **the commands it executes** go into a sandbox: one per session, claimed from a warm pool in about 0.2 s, with deletion requested when the session ends (controller reclamation is asynchronous). The task's code is synced both ways, so the host's working tree stays the git source of truth, and git network commands (`push`, `fetch`, `clone`, …) run back on the host, where the credentials are.
 
 Built on [k3s](https://k3s.io), [kubernetes-sigs/agent-sandbox](https://github.com/kubernetes-sigs/agent-sandbox) and [gVisor](https://gvisor.dev). It needs no KVM, so ordinary cloud VMs work.
 
@@ -24,6 +24,23 @@ Built on [k3s](https://k3s.io), [kubernetes-sigs/agent-sandbox](https://github.c
 | `src/self_hosted_agent_sandbox/` | the core library (`Sandbox`): claim / renew / release, environment and file sync, two-way code sync with a `.git` allowlist, host-command routing. Pure Python, no dependencies |
 | `sbx` | a CLI over the core: `sbx exec`, `sbx shell`, `sbx release` |
 
+The **Python `Sandbox` API** and `sbx` CLI are the supported entry points for this general-purpose foundation. There is **no HTTP server or durable job service** in SDK 0.4.0rc1. Integrations own orchestration, cancellation and cleanup verification; Kubernetes is the underlying platform, not a reason for each caller to build another Job backend.
+
+**0.4.0rc1 prerelease:** this tree includes public allocation/verified-release APIs and acknowledged/strict receipt. The stable PyPI baseline remains 0.3.0; install the RC explicitly from the [GitHub prerelease](https://github.com/xiaoyaner0201/self-hosted-agent-sandbox/releases/tag/v0.4.0rc1), not by an unqualified PyPI upgrade. Source and installed-wheel local gates passed. These new APIs are not claimed as live Kubernetes/gVisor/Temporal acceptance; the Temporal canary below exercised historical 0.3.0. See [release notes](docs/releases/0.4.0rc1.md).
+
+```text
+Agent / adapter (host): orchestration, credentials, durable allocation ledger
+       | Python Sandbox API / sbx
+       | Kubernetes API + exec tunnel (host-initiated)
+       v
+agent-sandbox controller -> warm pool -> non-root gVisor Pod
+       ^                                  |
+       | explicit UID-aware release       | allowlisted code receipt + ACK
+       +----------------------------------+
+```
+
+The SDK owns command routing, local subprocess cleanup and file transfer. The controller owns scheduling/expiry; adapters own durable recovery, cancellation policy and artifact validation. API-resource absence, remote process death and artifact delivery are separate verdicts.
+
 ## 🔌 Adapters
 
 | Agent / platform | How | Status |
@@ -33,6 +50,7 @@ Built on [k3s](https://k3s.io), [kubernetes-sigs/agent-sandbox](https://github.c
 | Codex CLI | native remote execution environment (`codex exec-server` in the sandbox), MCP as fallback | 🛠️ planned |
 | Multica runtimes | through the agent adapters above; covers assigned issues, webhook autopilots (e.g. on `pull_request`) and PR wakeups | 🛠️ planned |
 | [OmniRoute](https://github.com/cheaper-inference/OmniRoute) | `agent-sandbox` skill runtime: `execute_command` / `eval_code` claim a pod from the pool ([guide](docs/omniroute.md)) | 🔄 upstream PR [#19130](https://github.com/cheaper-inference/OmniRoute/pull/19130) open, not merged; verified on a lab cluster |
+| [Temporal](https://temporal.io) | Activity calls the Python `Sandbox` API: claim → exec → verified cleanup ([guide](docs/temporal.md)) | 🧪 consumer-owned adapter candidate; isolated SDK 0.3.0 canary recorded, not bundled here or switched to production |
 
 Anything else can call the CLI or the library directly.
 
@@ -70,7 +88,7 @@ cluster/make-kubeconfig.sh https://10.0.0.11:6443 > agent-sandbox.kubeconfig   #
 **3. Agent host**
 
 ```bash
-pip install self-hosted-agent-sandbox
+pip install self-hosted-agent-sandbox==0.3.0
 export AGENT_SANDBOX_KUBECONFIG=$PWD/agent-sandbox.kubeconfig AGENT_SANDBOX_POOL=sbx-team-a
 cd /workspaces/my-repo
 sbx exec --session demo -- 'cat /proc/version; make test'     # runs in a fresh gVisor sandbox
@@ -79,14 +97,48 @@ sbx exec --session demo -- git push origin HEAD                # runs on this ho
 
 `--keep` keeps the claim, so later `sbx exec --session demo --keep` calls share one sandbox until `sbx release --session demo`. `kubectl` must be on `PATH`, or set `AGENT_SANDBOX_KUBECTL`.
 
+The command above installs the stable baseline. For the new API examples below, download the `0.4.0rc1` wheel and `SHA256SUMS` from the prerelease, verify its SHA-256, then run `pip install ./self_hosted_agent_sandbox-0.4.0rc1-py3-none-any.whl`.
+
 From Python:
 
 ```python
 from self_hosted_agent_sandbox import Sandbox
 sb = Sandbox(cwd="/workspaces/my-repo", session="task-42")
 print(sb.execute("pytest -q")["output"])
-sb.close()
+sb.close()  # legacy best-effort async delete, not a reclamation receipt
 ```
+
+For public allocation snapshots, constructor-failure recovery and opt-in bounded release
+with exact claim/Sandbox/Pod read-back, see [Lifecycle ownership](docs/lifecycle.md).
+`close()` and session-label `release()` retain their existing behavior.
+
+## Explicit lifecycle and artifact ownership (RC)
+
+```python
+from self_hosted_agent_sandbox import Sandbox
+
+# Caller supplies an atomic, durable save_target(Allocation) implementation.
+# Persist target._asdict(); restore with Allocation(**saved_json).
+sb = Sandbox(cwd="/workspaces/my-repo", session="attempt-unique-id",
+             on_allocation=save_target,
+             config={"agent_sandbox_strict_pull": True})
+result = sb.execute("make && mkdir -p out && cp dist/package.tar.gz out/package.tar.gz")
+if result["returncode"] != 0:
+    raise RuntimeError("build failed")
+# Validate expected out/package.tar.gz, its length and hash on the host here.
+# Quiesce/join other execution owners, then explicitly release (does NOT pull):
+released = sb.release_verified(timeout=15)
+```
+
+This is the success path, not a complete exception policy. On a receipt failure the command may already have run: repair transport/disk or move/remove a conflicting host file/directory, then retry **`sb.pull()` on the same instance**, not the command or constructor. Strict close retains the claim on receipt failure; `force_remove=True` does not bypass it. Default close remains best-effort/async and can discard unreceived results. Pending receipt blocks the next stale push in either mode. No automatic recursive host-tree deletion resolves type conflicts.
+
+Persist `error.allocation` / `ReleaseError.allocation` and recover with `Sandbox.release_allocation(target, config=original_config, timeout=15)`; preserve the original execution error separately. Verified release requires opt-in Sandbox CR observer permission, fails closed on missing inventory, and verifies exact API names/UIDs, **not physical process death**. See [full lifecycle contract](docs/lifecycle.md).
+
+## Build capability boundary
+
+- Run ordinary toolchains already present in the sandbox image; dependencies, network policy and resource limits remain operator choices.
+- An isolated rootless BuildKit **COPY-only** OCI export was exercised. That does not establish a general container builder: Dockerfile **RUN** was restricted by the current sandbox's namespace/mount/security constraints. Do not advertise Docker-in-Docker, privileged builds, arbitrary Dockerfiles or image push as supported.
+- `dist`, `build`, `node_modules` and other [excluded directories](docs/artifact-pull.md#directory-exclusions-and-explicit-export--目录排除与显式导出) stay excluded. Copy only named outputs into a non-excluded `out/` within a code dir; strict receipt is not expected-artifact/hash validation or durable artifact storage.
 
 ## 🧭 What runs where
 
@@ -107,6 +159,7 @@ Environment variables (adapters may also take them from their own config, e.g. H
 | `AGENT_SANDBOX_KUBECTL` | `kubectl` | kubectl binary |
 | `AGENT_SANDBOX_SYNC_PATHS` | – | config files/dirs pushed at the same path |
 | `AGENT_SANDBOX_CODE_DIRS` | task dir | two-way synced code dirs |
+| `AGENT_SANDBOX_STRICT_PULL` | `false` | propagate post-command receipt failure; strict close retains the claim on receipt failure. See [artifact receipt contract](docs/artifact-pull.md) |
 | `AGENT_SANDBOX_HOST_COMMANDS` | git network ops, `git remote add/set-url` | command prefixes that run on the host, matched word by word (replaces the default list) |
 | `AGENT_SANDBOX_FORWARD_ENV` | – (nothing) | host variables to forward, by name or glob, e.g. `MY_BUILD_FLAG,NPM_CONFIG_REGISTRY`. Never list tokens or keys |
 | `AGENT_SANDBOX_ENV_SKIP` | – | names to withhold even when the allowlist matches them (globs like `*_TOKEN` work) |
@@ -114,6 +167,8 @@ Environment variables (adapters may also take them from their own config, e.g. H
 | `AGENT_SANDBOX_IDLE_TTL` | `1800` | cluster-side expiry in seconds, renewed while active |
 | `AGENT_SANDBOX_PERSISTENT` | `false` | reuse one claim per session label |
 | `AGENT_SANDBOX_CLAIM_TIMEOUT` | `180` | seconds to wait for a sandbox before giving up |
+
+Code receipt now acknowledges its watermark only after payload checksum validation and local application. `sb.pull()` retries receipt without rerunning a command. Strict mode is opt-in; default command results remain best-effort. Build callers must explicitly copy named outputs from excluded `dist/build` into a non-excluded `out/` inside a code dir and verify their expected files/hashes. No dependency/build directory is enabled for whole-tree export. [Details and limits](docs/artifact-pull.md).
 
 ## 🌐 Network allowlist
 
@@ -157,6 +212,8 @@ Each arrow starts at the side that opens the connection.
 
 - `tests/route_table.py` (fixed cases) and `tests/route_fuzz.py` (random commands run through real bash, asserting nothing is written outside the code dir) check host-command routing offline: `python tests/route_table.py`.
 - `tests/core_unit.py` checks error handling, streaming output, `release`, the variable allowlist (empty by default: a host API key does not reach the sandbox; dropped names are unset) and the git config allowlists (host and repository) offline with a fake `kubectl`.
+- `tests/artifact_pull.py` uses real tar/binary transfers in a disposable **local Docker** container: truncation/corruption, failed ack, retry hashes, strict/default behavior and unchanged exclusions. No cluster; requires an already-local image and `sha256sum` in it. See [prerequisites](docs/artifact-pull.md#verification--验证入口).
+- `tests/lifecycle_unit.py` (31) exercises fake-kubectl lifecycle and real local POSIX process groups; `tests/artifact_integrity.py` (10) and `tests/integration_cross.py` (5) extend real Docker receipt/recovery coverage. Source and installed-wheel local gates were run; none substitutes for live-cluster acceptance.
 - `tests/e2e.sh` drives the `sbx` CLI against a real cluster: gVisor, variable forwarding, pull-back of files and commits, host routing, claim reuse and release, exit codes.
 - Adapter repos carry their own acceptance suites (for Hermes: 26 + 15 end-to-end checks).
 

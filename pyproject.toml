@@ -1,6 +1,6 @@
 [project]
 name = "self-hosted-agent-sandbox"
-version = "0.3.0"
+version = "0.4.0rc1"
 description = "Disposable gVisor sandboxes for AI coding agents on your own k3s nodes (kubernetes-sigs/agent-sandbox)"
 readme = "README.md"
 license = "Apache-2.0"
