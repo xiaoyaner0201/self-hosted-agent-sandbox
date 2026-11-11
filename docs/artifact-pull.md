@@ -2,9 +2,9 @@
 
 ## Scope / 范围
 
-This 0.4.0rc1 SDK prerelease combines acknowledged receipt with the separately documented [lifecycle API](lifecycle.md). The receipt component itself changes neither routing nor claim acquisition/expiry/release design; it is not an artifact service. A `Sandbox` is used by one serialized command stream; concurrent processes sharing the same claim are unsupported. This candidate does not provide durable recovery after process restart, claim expiry/deletion, or a new `Sandbox` constructor (which adopts the host tree as authoritative).
+The 0.4.0 SDK combines acknowledged receipt with the separately documented [lifecycle API](lifecycle.md). The receipt component itself changes neither routing nor claim acquisition/expiry/release design; it is not an artifact service. A `Sandbox` is used by one serialized command stream; concurrent processes sharing the same claim are unsupported. This candidate does not provide durable recovery after process restart, claim expiry/deletion, or a new `Sandbox` constructor (which adopts the host tree as authoritative).
 
-本候选只修 SDK 回传完整性与确认时机，不接制品仓库、构建调度、CI/CD、平台 API，也不改变目录排除规则或现有路由。生命周期能力已一并整合，见 [生命周期合同](lifecycle.md)；`release_verified()` 不回传文件，回收成功不等于制品已收。使用同一个仍存活的实例重试，不能以重新构造实例代替重试。
+本功能只修 SDK 回传完整性与确认时机，不接制品仓库、构建调度、CI/CD、平台 API，也不改变目录排除规则或现有路由。生命周期能力已一并整合，见 [生命周期合同](lifecycle.md)；`release_verified()` 不回传文件，回收成功不等于制品已收。使用同一个仍存活的实例重试，不能以重新构造实例代替重试。
 
 ## Compatibility and strict mode / 兼容与严格模式
 

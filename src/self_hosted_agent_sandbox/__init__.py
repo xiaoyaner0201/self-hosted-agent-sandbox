@@ -2,4 +2,4 @@
 from .core import Allocation, ReleaseError, Sandbox
 
 __all__ = ["Allocation", "ReleaseError", "Sandbox", "__version__"]
-__version__ = "0.4.0rc1"
+__version__ = "0.4.0"

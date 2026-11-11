@@ -24,9 +24,9 @@ Built on [k3s](https://k3s.io), [kubernetes-sigs/agent-sandbox](https://github.c
 | `src/self_hosted_agent_sandbox/` | the core library (`Sandbox`): claim / renew / release, environment and file sync, two-way code sync with a `.git` allowlist, host-command routing. Pure Python, no dependencies |
 | `sbx` | a CLI over the core: `sbx exec`, `sbx shell`, `sbx release` |
 
-The **Python `Sandbox` API** and `sbx` CLI are the supported entry points for this general-purpose foundation. There is **no HTTP server or durable job service** in SDK 0.4.0rc1. Integrations own orchestration, cancellation and cleanup verification; Kubernetes is the underlying platform, not a reason for each caller to build another Job backend.
+The **Python `Sandbox` API** and `sbx` CLI are the supported entry points for this general-purpose foundation. There is **no HTTP server or durable job service** in SDK 0.4.0. Integrations own orchestration, cancellation and cleanup verification; Kubernetes is the underlying platform, not a reason for each caller to build another Job backend.
 
-**0.4.0rc1 prerelease:** this tree includes public allocation/verified-release APIs and acknowledged/strict receipt. The stable PyPI baseline remains 0.3.0; install the RC explicitly from the [GitHub prerelease](https://github.com/xiaoyaner0201/self-hosted-agent-sandbox/releases/tag/v0.4.0rc1), not by an unqualified PyPI upgrade. Source and installed-wheel local gates passed. These new APIs are not claimed as live Kubernetes/gVisor/Temporal acceptance; the Temporal canary below exercised historical 0.3.0. See [release notes](docs/releases/0.4.0rc1.md).
+**0.4.0:** adds public allocation/verified-release APIs and acknowledged/strict receipt (`pip install self-hosted-agent-sandbox==0.4.0`). Source and installed-wheel local gates passed. These new APIs are not claimed as live Kubernetes/gVisor/Temporal acceptance; the Temporal canary below exercised historical 0.3.0. See [release notes](docs/releases/0.4.0.md).
 
 ```text
 Agent / adapter (host): orchestration, credentials, durable allocation ledger
@@ -88,7 +88,7 @@ cluster/make-kubeconfig.sh https://10.0.0.11:6443 > agent-sandbox.kubeconfig   #
 **3. Agent host**
 
 ```bash
-pip install self-hosted-agent-sandbox==0.3.0
+pip install self-hosted-agent-sandbox==0.4.0
 export AGENT_SANDBOX_KUBECONFIG=$PWD/agent-sandbox.kubeconfig AGENT_SANDBOX_POOL=sbx-team-a
 cd /workspaces/my-repo
 sbx exec --session demo -- 'cat /proc/version; make test'     # runs in a fresh gVisor sandbox
@@ -96,8 +96,6 @@ sbx exec --session demo -- git push origin HEAD                # runs on this ho
 ```
 
 `--keep` keeps the claim, so later `sbx exec --session demo --keep` calls share one sandbox until `sbx release --session demo`. `kubectl` must be on `PATH`, or set `AGENT_SANDBOX_KUBECTL`.
-
-The command above installs the stable baseline. For the new API examples below, download the `0.4.0rc1` wheel and `SHA256SUMS` from the prerelease, verify its SHA-256, then run `pip install ./self_hosted_agent_sandbox-0.4.0rc1-py3-none-any.whl`.
 
 From Python:
 
@@ -112,7 +110,7 @@ For public allocation snapshots, constructor-failure recovery and opt-in bounded
 with exact claim/Sandbox/Pod read-back, see [Lifecycle ownership](docs/lifecycle.md).
 `close()` and session-label `release()` retain their existing behavior.
 
-## Explicit lifecycle and artifact ownership (RC)
+## Explicit lifecycle and artifact ownership
 
 ```python
 from self_hosted_agent_sandbox import Sandbox
