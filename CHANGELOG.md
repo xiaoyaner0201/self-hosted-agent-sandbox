@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.0
+
+- Stable release of 0.4.0rc1 with no library code changes: published to PyPI
+  (`pip install self-hosted-agent-sandbox==0.4.0`). Contracts and verification
+  limits are unchanged; see [release notes](docs/releases/0.4.0.md).
+
 ## 0.4.0rc1 — prerelease
 
 - Add recoverable `Allocation` snapshots, `on_allocation` acquisition callbacks,

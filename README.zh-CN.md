@@ -24,9 +24,9 @@ Agent 原来跑在哪台机器上，接入后还跑在那里，只有 **它执�
 | `src/self_hosted_agent_sandbox/` | 核心库（`Sandbox`）：领用、续期、释放，环境变量和文件同步，带 `.git` 白名单的代码双向同步，哪些命令回原机器执行。纯 Python，无依赖 |
 | `sbx` | 基于核心库的命令行：`sbx exec`、`sbx shell`、`sbx release` |
 
-这个通用底座的正式入口是 **Python `Sandbox` API** 和 `sbx` CLI；SDK 0.4.0rc1 **没有 HTTP server 或持久作业服务**。调用方负责业务编排、取消和回收验证；Kubernetes 是底层平台，不意味着每个调用方都应再造一套 Job backend。
+这个通用底座的正式入口是 **Python `Sandbox` API** 和 `sbx` CLI；SDK 0.4.0 **没有 HTTP server 或持久作业服务**。调用方负责业务编排、取消和回收验证；Kubernetes 是底层平台，不意味着每个调用方都应再造一套 Job backend。
 
-**0.4.0rc1 预发布：** 本树包含公共 allocation/verified-release API 与 ACK/strict 回传。PyPI 稳定基线仍为 0.3.0；需从 [GitHub 预发布](https://github.com/xiaoyaner0201/self-hosted-agent-sandbox/releases/tag/v0.4.0rc1)显式安装 RC，普通 PyPI 升级不会获得这些新增 API。源码和非 editable wheel 的本地门禁已过；不据此声称新 API 已完成 Kubernetes/gVisor/Temporal 实机验收。下方 Temporal canary 仅运行过历史 0.3.0。见[发行说明](docs/releases/0.4.0rc1.md)。
+**0.4.0：** 新增公共 allocation/verified-release API 与 ACK/strict 回传（`pip install self-hosted-agent-sandbox==0.4.0`）。源码和非 editable wheel 的本地门禁已过；不据此声称新 API 已完成 Kubernetes/gVisor/Temporal 实机验收。下方 Temporal canary 仅运行过历史 0.3.0。见[发行说明](docs/releases/0.4.0.md)。
 
 ```text
 Agent / 适配层（原主机）：编排、凭据、持久 allocation 账本
@@ -88,7 +88,7 @@ cluster/make-kubeconfig.sh https://10.0.0.11:6443 > agent-sandbox.kubeconfig   #
 **3. Agent 主机**
 
 ```bash
-pip install self-hosted-agent-sandbox==0.3.0
+pip install self-hosted-agent-sandbox==0.4.0
 export AGENT_SANDBOX_KUBECONFIG=$PWD/agent-sandbox.kubeconfig AGENT_SANDBOX_POOL=sbx-team-a
 cd /workspaces/my-repo
 sbx exec --session demo -- 'cat /proc/version; make test'     # 在新的 gVisor 沙箱里跑
@@ -96,8 +96,6 @@ sbx exec --session demo -- git push origin HEAD                # 在本机跑，
 ```
 
 加 `--keep` 会保留沙箱，之后的 `sbx exec --session demo --keep` 都用同一个，直到 `sbx release --session demo`。`PATH` 里要有 `kubectl`，或者用 `AGENT_SANDBOX_KUBECTL` 指定。
-
-上方命令安装稳定基线。下方新增 API 示例需要从预发布下载 `0.4.0rc1` wheel 和 `SHA256SUMS`，核验 SHA-256 后执行 `pip install ./self_hosted_agent_sandbox-0.4.0rc1-py3-none-any.whl`。
 
 在 Python 里用：
 
@@ -111,7 +109,7 @@ sb.close()  # 兼容旧行为：只发起异步删除，不代表已回收
 公共 allocation 快照、构造失败恢复，以及对 Claim/Sandbox/Pod 做精确读回的有界释放，见 [生命周期归属](docs/lifecycle.md)。
 `close()` 和按 session 的 `release()` 保持原行为。
 
-## 显式生命周期与制品归属（RC）
+## 显式生命周期与制品归属
 
 ```python
 from self_hosted_agent_sandbox import Sandbox

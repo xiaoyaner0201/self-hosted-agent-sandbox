@@ -17,7 +17,7 @@ def main():
     python = str(Path(sys.argv[1]).absolute())
     probe = """import json, inspect
 from self_hosted_agent_sandbox import Sandbox, Allocation, ReleaseError, __version__, core
-assert __version__ == '0.4.0rc1'
+assert __version__ == '0.4.0'
 assert 'on_allocation' in inspect.signature(Sandbox).parameters
 assert all(hasattr(Sandbox, n) for n in ('pull', 'release_verified', 'release_allocation'))
 a = Allocation('namespace', 'claim')

@@ -1,4 +1,4 @@
-# Explicit lifecycle ownership (0.4.0rc1)
+# Explicit lifecycle ownership (0.4.0)
 
 `Sandbox` stays framework-independent. Existing Hermes/CLI callers may continue using
 `close()` unchanged. Callers needing a cleanup verdict can opt into public target snapshots
