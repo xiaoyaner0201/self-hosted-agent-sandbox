@@ -2,57 +2,57 @@
 
 # 🧊 self-hosted-agent-sandbox
 
-**Disposable gVisor sandboxes for AI coding agents, on k3s nodes you own: a shared warm pool, per-node package caches, and git credentials that never enter the sandbox.**
+**Let your AI coding agent run commands in a throwaway gVisor sandbox on your own k3s nodes, while its git credentials stay on the host.**
 
 English · [简体中文](README.zh-CN.md)
 
-![License](https://img.shields.io/badge/license-Apache--2.0-blue) ![k3s](https://img.shields.io/badge/k3s-v1.37-FFC61C) ![gVisor](https://img.shields.io/badge/isolation-gVisor-4285F4) ![agent-sandbox](https://img.shields.io/badge/kubernetes--sigs%2Fagent--sandbox-v1.0.9-326CE5) ![Self-hosted](https://img.shields.io/badge/self--hosted-multi--node-2E8B57) ![Python](https://img.shields.io/badge/python-3.10%2B%20·%20no%20deps-3776AB) ![Status](https://img.shields.io/badge/status-early-orange)
+[![PyPI](https://img.shields.io/pypi/v/self-hosted-agent-sandbox?color=3775A9&label=PyPI)](https://pypi.org/project/self-hosted-agent-sandbox/) [![CI](https://github.com/xiaoyaner0201/self-hosted-agent-sandbox/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/xiaoyaner0201/self-hosted-agent-sandbox/actions/workflows/ci.yml) [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE) [![Python](https://img.shields.io/badge/python-3.10%2B%20·%20no%20deps-3776AB)](pyproject.toml) [![gVisor](https://img.shields.io/badge/isolation-gVisor-4285F4)](https://gvisor.dev) [![agent-sandbox](https://img.shields.io/badge/kubernetes--sigs%2Fagent--sandbox-v1.0.9-326CE5)](https://github.com/kubernetes-sigs/agent-sandbox)
+
+<img src="docs/images/demo.png" alt="Illustrative sbx session: tests run in a gVisor pod, changed files come back to the host, git push runs on the host, a push typed inside the sandbox gets a stub error" width="820">
+
+<sub>Illustrative session with a fictional repo.</sub>
 
 </div>
 
 ---
 
-The agent keeps running where it runs today. Only **the commands it executes** go into a sandbox: one per session, claimed from a warm pool in about 0.2 s, with deletion requested when the session ends (controller reclamation is asynchronous). The task's code is synced both ways, so the host's working tree stays the git source of truth, and git network commands (`push`, `fetch`, `clone`, …) run back on the host, where the credentials are.
+## 🤔 Why
 
-Built on [k3s](https://k3s.io), [kubernetes-sigs/agent-sandbox](https://github.com/kubernetes-sigs/agent-sandbox) and [gVisor](https://gvisor.dev). It needs no KVM, so ordinary cloud VMs work.
+A coding agent such as Claude Code, Codex or Hermes normally runs `make`, `npm install` and `pytest` **on the machine it lives on**. Those commands execute whatever the repository, its dependencies and its post-install scripts contain, with your user's files, SSH keys, cloud tokens and network in reach. One prompt injection in an issue, or one malicious package, is enough.
 
-## 🧩 What is in this repo
+Containers on the same host help, but they share the kernel and are usually mounted with the same credentials. Hosted sandboxes move your code to someone else's machines.
 
-| Part | What it is |
-|---|---|
-| `cluster/` | node install with a hard pod memory budget, gVisor, least-privilege RBAC and kubeconfig, per-tenant warm pools with per-node caches, cache GC |
-| `src/self_hosted_agent_sandbox/` | the core library (`Sandbox`): claim / renew / release, environment and file sync, two-way code sync with a `.git` allowlist, host-command routing. Pure Python, no dependencies |
-| `sbx` | a CLI over the core: `sbx exec`, `sbx shell`, `sbx release` |
+This project keeps the agent where it is and sends **only the commands it executes** to a gVisor pod on nodes you own. Code is synced both ways, so the host tree stays the git source of truth, and the handful of commands that need credentials (`git push`, `fetch`, `clone`, …) are routed back to the host.
 
-The **Python `Sandbox` API** and `sbx` CLI are the supported entry points for this general-purpose foundation. There is **no HTTP server or durable job service** in SDK 0.4.0. Integrations own orchestration, cancellation and cleanup verification; Kubernetes is the underlying platform, not a reason for each caller to build another Job backend.
+## ✨ Highlights
 
-**0.4.0:** adds public allocation/verified-release APIs and acknowledged/strict receipt (`pip install self-hosted-agent-sandbox==0.4.0`). Source and installed-wheel local gates passed. These new APIs are not claimed as live Kubernetes/gVisor/Temporal acceptance; the Temporal canary below exercised historical 0.3.0. See [release notes](docs/releases/0.4.0.md).
+- 🧊 **gVisor isolation, no KVM needed.** Each session gets its own pod with a user-space kernel, non-root, without a service-account token. Ordinary cloud VMs work.
+- ⚡ **Warm pool.** A sandbox is claimed from a pre-started pool in about 0.2 s and deleted when the session ends. Pools are shared across nodes, each node keeps per-tenant package caches.
+- 🔑 **Credentials stay home.** No host variable is forwarded unless you name it. Git network commands run on the host; inside the sandbox they are stubs that exit 97 with a hint.
+- 🔁 **Two-way code sync with guard rails.** Pull-back into `.git` is an allowlist, so nothing built in the sandbox can plant a hook that the host later runs.
+- 🐍 **Small surface.** A pure-Python SDK (`Sandbox`) and a CLI (`sbx`), standard library only, `kubectl` as the only binary.
+- 🏗️ **Cluster recipes included.** Node install with a hard pod memory budget, gVisor, least-privilege RBAC and kubeconfig, per-tenant pools, cache GC.
 
-```text
-Agent / adapter (host): orchestration, credentials, durable allocation ledger
-       | Python Sandbox API / sbx
-       | Kubernetes API + exec tunnel (host-initiated)
-       v
-agent-sandbox controller -> warm pool -> non-root gVisor Pod
-       ^                                  |
-       | explicit UID-aware release       | allowlisted code receipt + ACK
-       +----------------------------------+
+> [!IMPORTANT]
+> The sandbox protects the host from what the agent runs; it does not hide what you send into it. Files in the code dirs and sync paths travel as they are, and every forwarded variable is readable by every command in the sandbox. Keep real keys out of the working tree and read [Security](#-security) before you point a production agent at it.
+
+## 🏗️ Architecture
+
+```mermaid
+flowchart TB
+    subgraph host["Agent host"]
+        agent["AI coding agent<br/>Claude Code · Codex · Hermes"] -->|every command| sdk["sbx / Sandbox SDK<br/>command router"]
+        sdk -->|"git push · fetch · clone"| creds["host git + credentials"]
+        tree[("working tree<br/>git source of truth")]
+    end
+    subgraph cluster["Your k3s cluster"]
+        pool["agent-sandbox warm pool"] -->|claim| pod["gVisor pod<br/>non-root · no SA token<br/>per-node package cache"]
+    end
+    sdk ==>|"kubectl exec, host-initiated (TCP 6443)"| pod
+    pod -.->|"changed files · allowlisted .git"| tree
 ```
 
-The SDK owns command routing, local subprocess cleanup and file transfer. The controller owns scheduling/expiry; adapters own durable recovery, cancellation policy and artifact validation. API-resource absence, remote process death and artifact delivery are separate verdicts.
-
-## 🔌 Adapters
-
-| Agent / platform | How | Status |
-|---|---|---|
-| [Hermes Agent](https://github.com/NousResearch/hermes-agent) | terminal backend plugin: [**hermes-sandbox-cluster**](https://github.com/xiaoyaner0201/hermes-sandbox-cluster) | ✅ in use; acceptance suites pass on Hermes 0.21.5 and 0.22.7 |
-| Claude Code | built-in Bash/Read/Write/Edit replaced by MCP tools backed by the sandbox | 🛠️ planned |
-| Codex CLI | native remote execution environment (`codex exec-server` in the sandbox), MCP as fallback | 🛠️ planned |
-| Multica runtimes | through the agent adapters above; covers assigned issues, webhook autopilots (e.g. on `pull_request`) and PR wakeups | 🛠️ planned |
-| [OmniRoute](https://github.com/cheaper-inference/OmniRoute) | `agent-sandbox` skill runtime: `execute_command` / `eval_code` claim a pod from the pool ([guide](docs/omniroute.md)) | ✅ upstream PR [#19130](https://github.com/cheaper-inference/OmniRoute/pull/19130) merged; verified on a lab cluster |
-| [Temporal](https://temporal.io) | Activity calls the Python `Sandbox` API: claim → exec → verified cleanup ([guide](docs/temporal.md)) | 🧪 consumer-owned adapter candidate; isolated SDK 0.3.0 canary recorded, not bundled here or switched to production |
-
-Anything else can call the CLI or the library directly.
+The host always opens the connection: the cluster never needs a route back to the agent host, and no sandbox gets an inbound rule.
 
 ## 🚀 Quick start
 
@@ -88,7 +88,7 @@ cluster/make-kubeconfig.sh https://10.0.0.11:6443 > agent-sandbox.kubeconfig   #
 **3. Agent host**
 
 ```bash
-pip install self-hosted-agent-sandbox==0.4.0
+pip install self-hosted-agent-sandbox
 export AGENT_SANDBOX_KUBECONFIG=$PWD/agent-sandbox.kubeconfig AGENT_SANDBOX_POOL=sbx-team-a
 cd /workspaces/my-repo
 sbx exec --session demo -- 'cat /proc/version; make test'     # runs in a fresh gVisor sandbox
@@ -106,9 +106,45 @@ print(sb.execute("pytest -q")["output"])
 sb.close()  # legacy best-effort async delete, not a reclamation receipt
 ```
 
-For public allocation snapshots, constructor-failure recovery and opt-in bounded release
-with exact claim/Sandbox/Pod read-back, see [Lifecycle ownership](docs/lifecycle.md).
-`close()` and session-label `release()` retain their existing behavior.
+For public allocation snapshots, constructor-failure recovery and opt-in bounded release with exact claim/Sandbox/Pod read-back, see [Lifecycle ownership](docs/lifecycle.md). `close()` and session-label `release()` retain their existing behavior.
+
+## 🔌 Supported agents
+
+| Agent / platform | How | Status |
+|---|---|---|
+| [Hermes Agent](https://github.com/NousResearch/hermes-agent) | terminal backend plugin: [**hermes-sandbox-cluster**](https://github.com/xiaoyaner0201/hermes-sandbox-cluster) | ✅ in use; acceptance suites pass on Hermes 0.21.5 and 0.22.7 |
+| Claude Code | built-in Bash/Read/Write/Edit/Glob/Grep switched off, the same tools served by an `sbx mcp` server backed by the sandbox | 🧪 prototype ran end to end on a lab cluster; not in a release yet |
+| Codex CLI | native remote execution environment: `codex exec-server` runs in the sandbox behind a stdio relay | 🧪 prototype ran end to end on a lab cluster; not in a release yet |
+| Multica runtimes | through the agent adapters above; covers assigned issues, webhook autopilots (e.g. on `pull_request`) and PR wakeups | 🛠️ planned |
+| [OmniRoute](https://github.com/cheaper-inference/OmniRoute) | `agent-sandbox` skill runtime: `execute_command` / `eval_code` claim a pod from the pool ([guide](docs/omniroute.md)) | ✅ upstream PR [#19130](https://github.com/cheaper-inference/OmniRoute/pull/19130) merged; verified on a lab cluster |
+| [Temporal](https://temporal.io) | Activity calls the Python `Sandbox` API: claim → exec → verified cleanup ([guide](docs/temporal.md)) | 🧪 consumer-owned adapter candidate; isolated SDK 0.3.0 canary recorded, not bundled here |
+
+Anything else can call the CLI or the library directly.
+
+## ⚖️ How it compares
+
+| Option | What it is | Where this project differs |
+|---|---|---|
+| [E2B](https://e2b.dev) | Firecracker microVM sandboxes behind an SDK, hosted or self-hosted | Runs on plain k3s with gVisor, so nodes need no KVM; built around an agent that already lives on a host, with code sync and host-routed git |
+| [Daytona](https://www.daytona.io) | A sandbox platform with its own API server, workspaces and dashboard | A library and CLI on top of Kubernetes primitives; no server of its own to operate |
+| [kubernetes-sigs/agent-sandbox](https://github.com/kubernetes-sigs/agent-sandbox) on its own | CRDs and a controller for sandbox pods and warm pools | This project uses it as the base and adds claim/exec/release, two-way code sync, host-command routing and cluster recipes |
+| Docker containers or the agent's built-in sandbox | Isolation on the agent's own machine | Shares the host kernel and machine; here commands run on other nodes under gVisor, and pools are shared across agents |
+
+Pick whichever fits: a hosted service is less work if your code may leave your machines; this project is for teams that want the agent's commands on hardware they control.
+
+## 🧩 What is in this repo
+
+| Part | What it is |
+|---|---|
+| `cluster/` | node install with a hard pod memory budget, gVisor, least-privilege RBAC and kubeconfig, per-tenant warm pools with per-node caches, cache GC |
+| `src/self_hosted_agent_sandbox/` | the core library (`Sandbox`): claim / renew / release, environment and file sync, two-way code sync with a `.git` allowlist, host-command routing. Pure Python, no dependencies |
+| `sbx` | a CLI over the core: `sbx exec`, `sbx shell`, `sbx release` |
+
+The **Python `Sandbox` API** and `sbx` CLI are the supported entry points. There is **no HTTP server or durable job service** in SDK 0.4.0. Integrations own orchestration, cancellation and cleanup verification; Kubernetes is the underlying platform, not a reason for each caller to build another Job backend.
+
+**0.4.0** adds public allocation/verified-release APIs and acknowledged/strict receipt. Source and installed-wheel local gates passed; the new APIs are not claimed as live Kubernetes/gVisor/Temporal acceptance (the Temporal canary exercised 0.3.0). See [release notes](docs/releases/0.4.0.md).
+
+The SDK owns command routing, local subprocess cleanup and file transfer. The controller owns scheduling/expiry; adapters own durable recovery, cancellation policy and artifact validation. API-resource absence, remote process death and artifact delivery are separate verdicts.
 
 ## Explicit lifecycle and artifact ownership
 

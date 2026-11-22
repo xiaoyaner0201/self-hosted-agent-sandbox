@@ -2,61 +2,61 @@
 
 # 🧊 self-hosted-agent-sandbox
 
-**给 AI 编程 Agent 用的自部署沙箱：命令跑在你自己 k3s 节点上一次性的 gVisor 沙箱里，多机共享预热池，每个节点自带依赖缓存，git 凭据不进沙箱。**
+**AI 编程 Agent 的命令，放到你自己 k3s 集群里的一次性 gVisor 沙箱去跑；git 凭据留在原机器，不进沙箱。**
 
 [English](README.md) · 简体中文
 
-![License](https://img.shields.io/badge/license-Apache--2.0-blue) ![k3s](https://img.shields.io/badge/k3s-v1.37-FFC61C) ![gVisor](https://img.shields.io/badge/isolation-gVisor-4285F4) ![agent-sandbox](https://img.shields.io/badge/kubernetes--sigs%2Fagent--sandbox-v1.0.9-326CE5) ![Self-hosted](https://img.shields.io/badge/self--hosted-multi--node-2E8B57) ![Python](https://img.shields.io/badge/python-3.10%2B%20·%20no%20deps-3776AB) ![Status](https://img.shields.io/badge/status-early-orange)
+[![PyPI](https://img.shields.io/pypi/v/self-hosted-agent-sandbox?color=3775A9&label=PyPI)](https://pypi.org/project/self-hosted-agent-sandbox/) [![CI](https://github.com/xiaoyaner0201/self-hosted-agent-sandbox/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/xiaoyaner0201/self-hosted-agent-sandbox/actions/workflows/ci.yml) [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE) [![Python](https://img.shields.io/badge/python-3.10%2B%20·%20no%20deps-3776AB)](pyproject.toml) [![gVisor](https://img.shields.io/badge/isolation-gVisor-4285F4)](https://gvisor.dev) [![agent-sandbox](https://img.shields.io/badge/kubernetes--sigs%2Fagent--sandbox-v1.0.9-326CE5)](https://github.com/kubernetes-sigs/agent-sandbox)
+
+<img src="docs/images/demo.png" alt="示意：测试在 gVisor Pod 里跑，改过的文件回到本机，git push 在本机执行，沙箱里敲的 push 只会收到提示" width="820">
+
+<sub>示意图，仓库和输出均为虚构。</sub>
 
 </div>
 
 ---
 
-Agent 原来跑在哪台机器上，接入后还跑在那里，只有 **它执行的命令** 进沙箱。每个会话一个沙箱，从预热池领用约 0.2 秒，会话结束请求删除（controller 异步回收）。任务代码双向同步，原机器上的工作目录始终是 git 正本；`push`、`fetch`、`clone` 这类 git 联网命令回原机器执行，凭据就在那里。
+## 🤔 为什么需要它
 
-底层用的是 [k3s](https://k3s.io)、[kubernetes-sigs/agent-sandbox](https://github.com/kubernetes-sigs/agent-sandbox) 和 [gVisor](https://gvisor.dev)。不需要 KVM，普通云主机就能部署。
+Claude Code、Codex、Hermes 这类编程 Agent，默认在**它自己所在的机器上**直接跑 `make`、`npm install`、`pytest`。这些命令会执行仓库、依赖和安装脚本里的任何代码，而同一台机器上就放着你的文件、SSH 私钥、云厂商 token 和内网访问权。一条带提示词注入的 issue，或者一个投毒的依赖包，就够出事了。
 
-## 🧩 仓库里有什么
+在本机起个容器能挡一部分，但内核是共用的，凭据往往也一起挂了进去；托管沙箱服务则要把代码送到别人的机器上。
 
-| 部分 | 内容 |
-|---|---|
-| `cluster/` | 节点安装（给沙箱划固定内存上限）、gVisor、最小权限账号和 kubeconfig、按租户的预热池和每节点依赖缓存、缓存清理 |
-| `src/self_hosted_agent_sandbox/` | 核心库（`Sandbox`）：领用、续期、释放，环境变量和文件同步，带 `.git` 白名单的代码双向同步，哪些命令回原机器执行。纯 Python，无依赖 |
-| `sbx` | 基于核心库的命令行：`sbx exec`、`sbx shell`、`sbx release` |
+这个项目的做法是：Agent 原地不动，只把**它执行的命令**送进你自己节点上的 gVisor Pod。代码双向同步，原机器上的工作目录始终是 git 正本；少数要用凭据的命令（`git push`、`fetch`、`clone` 等）自动转回原机器执行。
 
-这个通用底座的正式入口是 **Python `Sandbox` API** 和 `sbx` CLI；SDK 0.4.0 **没有 HTTP server 或持久作业服务**。调用方负责业务编排、取消和回收验证；Kubernetes 是底层平台，不意味着每个调用方都应再造一套 Job backend。
+## ✨ 亮点
 
-**0.4.0：** 新增公共 allocation/verified-release API 与 ACK/strict 回传（`pip install self-hosted-agent-sandbox==0.4.0`）。源码和非 editable wheel 的本地门禁已过；不据此声称新 API 已完成 Kubernetes/gVisor/Temporal 实机验收。下方 Temporal canary 仅运行过历史 0.3.0。见[发行说明](docs/releases/0.4.0.md)。
+- 🧊 **gVisor 隔离，不需要 KVM**：每个会话一个独立 Pod，跑在用户态内核里（gVisor：Google 开源的容器沙箱，系统调用不直接落到宿主内核），非 root、不挂 ServiceAccount token。普通云主机就能部署。
+- ⚡ **预热池秒领**：从提前启动好的池子里领一个沙箱约 0.2 秒，会话结束即删除。池子多节点共享，每个节点按租户保留依赖缓存，`npm install` 不用每次从头下。
+- 🔑 **凭据不出门**：主机环境变量默认一个都不传，要传得点名。git 联网命令在原机器执行；沙箱里同名命令只是个桩，打印提示后以退出码 97 结束，Agent 一看就知道该换个方式调。
+- 🔁 **双向同步有护栏**：往 `.git` 回写走白名单，沙箱里生成的东西没法偷偷埋一个 hook 等原机器下次 `git push` 时触发。
+- 🐍 **接口小**：纯 Python SDK（`Sandbox`）加命令行 `sbx`，只用标准库，唯一外部程序是 `kubectl`。
+- 🏗️ **集群脚本自带**：节点安装（给沙箱划死内存上限）、gVisor、最小权限账号和 kubeconfig、按租户的预热池、缓存清理，都在 `cluster/` 里。
 
-```text
-Agent / 适配层（原主机）：编排、凭据、持久 allocation 账本
-       | Python Sandbox API / sbx
-       | Kubernetes API + exec 隧道（原主机主动连接）
-       v
-agent-sandbox controller -> 预热池 -> 非 root gVisor Pod
-       ^                                  |
-       | 显式 UID 感知回收验证             | 白名单代码回传 + ACK
-       +----------------------------------+
+> [!IMPORTANT]
+> 沙箱挡的是「Agent 跑的东西伤到原机器」，不负责替你过滤送进去的内容。代码目录和同步路径里的文件原样进沙箱，点名转发的环境变量沙箱里所有命令都读得到。真实密钥别放工作目录里；接生产 Agent 之前先看一遍下面的[安全](#-安全)。
+
+## 🏗️ 架构
+
+```mermaid
+flowchart TB
+    subgraph host["Agent 所在机器"]
+        agent["AI 编程 Agent<br/>Claude Code · Codex · Hermes"] -->|每条命令| sdk["sbx / Sandbox SDK<br/>命令分流"]
+        sdk -->|"git push · fetch · clone"| creds["本机 git + 凭据"]
+        tree[("工作目录<br/>git 正本")]
+    end
+    subgraph cluster["你自己的 k3s 集群"]
+        pool["agent-sandbox 预热池"] -->|领用| pod["gVisor Pod<br/>非 root · 无 SA token<br/>节点本地依赖缓存"]
+    end
+    sdk ==>|"kubectl exec，由原机器发起（TCP 6443）"| pod
+    pod -.->|"改动的文件 · 白名单内的 .git"| tree
 ```
 
-SDK 负责命令分流、本地子进程清理和文件传输；controller 负责调度/到期，适配层负责持久恢复、取消策略和制品验证。API 资源消失、远端进程死亡、制品收妥是不同结论。
+连接永远由原机器主动发起：集群不需要能连回 Agent 主机，沙箱也不用开任何入站端口。
 
-## 🔌 适配
+## 🚀 三步上手
 
-| Agent / 平台 | 接法 | 状态 |
-|---|---|---|
-| [Hermes Agent](https://github.com/NousResearch/hermes-agent) | 终端后端插件 [**hermes-sandbox-cluster**](https://github.com/xiaoyaner0201/hermes-sandbox-cluster) | ✅ 已在用，Hermes 0.21.5 和 0.22.7 验收全过 |
-| Claude Code | 用沙箱提供的 MCP 工具替换自带的 Bash/Read/Write/Edit | 🛠️ 计划中 |
-| Codex CLI | 官方远端执行环境（沙箱里跑 `codex exec-server`），备选 MCP | 🛠️ 计划中 |
-| Multica 运行时 | 经上面几个 Agent 适配接入；覆盖分配任务、Webhook 自动化（如 `pull_request`）和 PR 唤醒 | 🛠️ 计划中 |
-| [OmniRoute](https://github.com/cheaper-inference/OmniRoute) | 技能运行时 `agent-sandbox`：`execute_command` / `eval_code` 从预热池领 Pod 执行（[接入说明](docs/omniroute.md)） | ✅ 上游 PR [#19130](https://github.com/cheaper-inference/OmniRoute/pull/19130) 已合并；实验集群已验证 |
-| [Temporal](https://temporal.io) | Activity 调用 Python `Sandbox` API：claim → exec → 验证回收（[接入说明](docs/temporal.zh-CN.md)） | 🧪 调用方维护的适配候选；有 SDK 0.3.0 隔离 canary 记录，本仓库未内置、未切生产 |
-
-其他程序可以直接调命令行或核心库。
-
-## 🚀 快速开始
-
-**1. 节点**（每台 Linux 机器都执行；脚本会下载官方 k3s 安装器，离线环境可放在 `$SBX_DL/install-k3s.sh`）
+**1. 装节点**（每台 Linux 机器都跑；脚本会拉官方 k3s 安装器，离线环境把它放到 `$SBX_DL/install-k3s.sh`）
 
 ```bash
 # 第一台（作为 k3s 主节点）
@@ -71,7 +71,7 @@ cluster/gvisor-node.sh
 cluster/cache-gc-install.sh      # 可选：每天清理缓存
 ```
 
-**2. 集群**（只在第一台执行一次，`kubectl` 即 `k3s kubectl`）
+**2. 配集群**（只在第一台跑一次，这里的 `kubectl` 就是 `k3s kubectl`）
 
 ```bash
 kubectl apply --server-side -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/v1.0.9/sandbox-with-extensions.yaml
@@ -85,10 +85,10 @@ cluster/make-kubeconfig.sh https://10.0.0.11:6443 > agent-sandbox.kubeconfig   #
 > [!TIP]
 > 沙箱用和 Agent 主机**同一个镜像**，两边的路径、工具链和缓存相关变量就完全一致，不用额外配置。
 
-**3. Agent 主机**
+**3. Agent 主机上用起来**
 
 ```bash
-pip install self-hosted-agent-sandbox==0.4.0
+pip install self-hosted-agent-sandbox
 export AGENT_SANDBOX_KUBECONFIG=$PWD/agent-sandbox.kubeconfig AGENT_SANDBOX_POOL=sbx-team-a
 cd /workspaces/my-repo
 sbx exec --session demo -- 'cat /proc/version; make test'     # 在新的 gVisor 沙箱里跑
@@ -106,8 +106,45 @@ print(sb.execute("pytest -q")["output"])
 sb.close()  # 兼容旧行为：只发起异步删除，不代表已回收
 ```
 
-公共 allocation 快照、构造失败恢复，以及对 Claim/Sandbox/Pod 做精确读回的有界释放，见 [生命周期归属](docs/lifecycle.md)。
-`close()` 和按 session 的 `release()` 保持原行为。
+公共 allocation 快照、构造失败恢复，以及对 Claim/Sandbox/Pod 做精确读回的有界释放，见 [生命周期归属](docs/lifecycle.md)。`close()` 和按 session 的 `release()` 保持原行为。
+
+## 🔌 支持哪些 Agent
+
+| Agent / 平台 | 接法 | 现状 |
+|---|---|---|
+| [Hermes Agent](https://github.com/NousResearch/hermes-agent) | 终端后端插件 [**hermes-sandbox-cluster**](https://github.com/xiaoyaner0201/hermes-sandbox-cluster) | ✅ 已在用，Hermes 0.21.5 和 0.22.7 验收全过 |
+| Claude Code | 关掉自带的 Bash/Read/Write/Edit/Glob/Grep，改由 `sbx mcp` 提供同名工具，背后是沙箱 | 🧪 原型在实验集群上端到端跑通，尚未进正式版 |
+| Codex CLI | 官方远端执行环境：沙箱里跑 `codex exec-server`，经 stdio 中继接回 | 🧪 原型在实验集群上端到端跑通，尚未进正式版 |
+| Multica 运行时 | 经上面几个 Agent 适配接入；覆盖分配任务、Webhook 自动化（如 `pull_request`）和 PR 唤醒 | 🛠️ 计划中 |
+| [OmniRoute](https://github.com/cheaper-inference/OmniRoute) | 技能运行时 `agent-sandbox`：`execute_command` / `eval_code` 从预热池领 Pod 执行（[接入说明](docs/omniroute.md)） | ✅ 上游 PR [#19130](https://github.com/cheaper-inference/OmniRoute/pull/19130) 已合并；实验集群已验证 |
+| [Temporal](https://temporal.io) | Activity 调用 Python `Sandbox` API：领用 → 执行 → 验证回收（[接入说明](docs/temporal.zh-CN.md)） | 🧪 调用方自己维护的适配候选；有 SDK 0.3.0 隔离 canary 记录，本仓库不内置 |
+
+其他程序直接调命令行或核心库即可。
+
+## ⚖️ 和同类方案怎么选
+
+| 方案 | 是什么 | 区别在哪 |
+|---|---|---|
+| [E2B](https://e2b.dev) | 基于 Firecracker 微虚拟机的沙箱服务，托管或自部署 | 本项目跑在普通 k3s + gVisor 上，节点不需要 KVM；面向「Agent 已经在某台机器上跑」的场景，自带代码同步和 git 回原机器 |
+| [Daytona](https://www.daytona.io) | 带 API 服务、工作区和控制台的沙箱平台 | 本项目只是 Kubernetes 原语之上的一个库和命令行，没有自己的服务端要运维 |
+| 直接用 [kubernetes-sigs/agent-sandbox](https://github.com/kubernetes-sigs/agent-sandbox) | 沙箱 Pod 和预热池的 CRD 与控制器 | 本项目以它为底座，补上领用/执行/释放、双向代码同步、命令分流和集群脚本 |
+| 本机 Docker 或 Agent 自带沙箱 | 在 Agent 自己的机器上做隔离 | 和原机器共用内核与资源；本项目把命令放到别的节点上、跑在 gVisor 里，池子多个 Agent 共用 |
+
+各有适用场景：代码可以出门、想省事，托管服务更轻松；想让 Agent 的命令只落在自己掌控的机器上，选这个。
+
+## 🧩 仓库里有什么
+
+| 部分 | 内容 |
+|---|---|
+| `cluster/` | 节点安装（给沙箱划固定内存上限）、gVisor、最小权限账号和 kubeconfig、按租户的预热池和每节点依赖缓存、缓存清理 |
+| `src/self_hosted_agent_sandbox/` | 核心库（`Sandbox`）：领用、续期、释放，环境变量和文件同步，带 `.git` 白名单的代码双向同步，哪些命令回原机器执行。纯 Python，无依赖 |
+| `sbx` | 基于核心库的命令行：`sbx exec`、`sbx shell`、`sbx release` |
+
+正式入口是 **Python `Sandbox` API** 和 `sbx` 命令行；SDK 0.4.0 **没有 HTTP 服务，也没有持久作业服务**。业务编排、取消和回收验证由调用方负责；Kubernetes 是底层平台，不是让每个调用方再造一套 Job 后端的理由。
+
+**0.4.0** 新增公共 allocation / verified-release API 和带确认的严格回传。源码和安装后 wheel 的本地门禁都已通过；新 API 还没做 Kubernetes/gVisor/Temporal 实机验收（Temporal canary 跑的是 0.3.0）。见[发行说明](docs/releases/0.4.0.md)。
+
+SDK 负责命令分流、本地子进程清理和文件传输；控制器负责调度和到期；适配层负责持久恢复、取消策略和制品校验。「API 资源已消失」「远端进程已结束」「制品已收妥」是三个不同的结论。
 
 ## 显式生命周期与制品归属
 
