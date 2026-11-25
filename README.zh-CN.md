@@ -30,7 +30,7 @@ Claude Code、Codex、Hermes 这类编程 Agent，默认在**它自己所在的�
 - ⚡ **预热池秒领**：从提前启动好的池子里领一个沙箱约 0.2 秒，会话结束即删除。池子多节点共享，每个节点按租户保留依赖缓存，`npm install` 不用每次从头下。
 - 🔑 **凭据不出门**：主机环境变量默认一个都不传，要传得点名。git 联网命令在原机器执行；沙箱里同名命令只是个桩，打印提示后以退出码 97 结束，Agent 一看就知道该换个方式调。
 - 🔁 **双向同步有护栏**：往 `.git` 回写走白名单，沙箱里生成的东西没法偷偷埋一个 hook 等原机器下次 `git push` 时触发。
-- 🐍 **接口小**：纯 Python SDK（`Sandbox`）加命令行 `sbx`，只用标准库，唯一外部程序是 `kubectl`。
+- 🐍 **接口小**：纯 Python SDK（`Sandbox`）加命令行 `sbx`，只用标准库，唯一外部程序是 `kubectl`（[本地驱动](docs/docker-driver.md)用 `docker`）。
 - 🏗️ **集群脚本自带**：节点安装（给沙箱划死内存上限）、gVisor、最小权限账号和 kubeconfig、按租户的预热池、缓存清理，都在 `cluster/` 里。
 
 > [!IMPORTANT]
@@ -107,6 +107,8 @@ sb.close()  # 兼容旧行为：只发起异步删除，不代表已回收
 ```
 
 公共 allocation 快照、构造失败恢复，以及对 Claim/Sandbox/Pod 做精确读回的有界释放，见 [生命周期归属](docs/lifecycle.md)。`close()` 和按 session 的 `release()` 保持原行为。
+
+手边没有集群？设 `AGENT_SANDBOX_DRIVER=docker AGENT_SANDBOX_DOCKER_IMAGE=<本地镜像>`，同一条代码路径就跑在本机 Docker 容器里，用于开发和 CI。默认 runc **不是**安全隔离，生产仍用 k8s + gVisor。见 [Docker 驱动](docs/docker-driver.md)。
 
 ## 🔌 支持哪些 Agent
 
@@ -208,6 +210,7 @@ released = sb.release_verified(timeout=15)
 | `AGENT_SANDBOX_PERSISTENT` | `false` | 同一会话标签复用同一个沙箱 |
 | `AGENT_SANDBOX_CLAIM_TIMEOUT` | `180` | 等沙箱就绪的最长秒数 |
 | `AGENT_SANDBOX_CHECKPOINT` | `false` | 每条命令后记一个 git 检查点（`refs/sbx/<session>/<序号>`），SHA 放进返回值的 `checkpoint`。见[检查点](docs/checkpoint.md) |
+| `AGENT_SANDBOX_DRIVER` | `kubernetes` | 设 `docker` 用本地容器做开发/CI，不是安全隔离；`AGENT_SANDBOX_DOCKER_*` 见 [Docker 驱动](docs/docker-driver.md) |
 
 回传游标现在只在载荷校验和本地应用成功后确认；`sb.pull()` 可以只重试接收、不重跑命令。严格模式显式开启，默认命令结果仍是 best-effort。构建调用方必须把指定制品从排除的 `dist/build` 复制到代码目录内未排除的 `out/`，并检查预期文件及 hash，不会默认放开构建/依赖全目录同步。详见[协议、兼容与限制](docs/artifact-pull.md)。
 
@@ -255,6 +258,7 @@ released = sb.release_verified(timeout=15)
 - `tests/core_unit.py` 用假的 `kubectl` 离线检查报错、流式输出、`release`、变量白名单（默认为空：主机上的 API key 不会进沙箱；去掉的变量会被 unset）和 git 配置白名单（主机和仓库两份）。
 - `tests/lifecycle_unit.py`（31）检查 fake kubectl 生命周期和真实本地 POSIX 进程组；`tests/artifact_pull.py`（11）、`tests/artifact_integrity.py`（10）、`tests/integration_cross.py`（5）使用真实 Docker 传输验证 ACK/恢复与交叉合同。源码和已安装 wheel 本地门禁已运行，不替代集群验收。
 - `tests/checkpoint_unit.py`（10）用真实宿主 git 仓库离线检查检查点、分叉、清理和命令行；`tests/checkpoint_docker.py`（1）在真实 Docker 回传后检查检查点，并确认沙箱伪造的 `refs/sbx` 文件不会落到宿主机。
+- `tests/docker_unit.py` 用假的 `docker` 离线检查 docker 驱动（启动参数、非 root、复用、可验证释放、拒绝同名换实例）；`tests/e2e_docker.sh` 用本机已有镜像在本地 Docker 上跑下面这组端到端检查。
 - `tests/e2e.sh` 用真实集群测 `sbx` 命令行：gVisor、变量同步、文件和 commit 回传、回原机器执行、沙箱复用和释放、退出码。
 - 各适配仓库有自己的验收（Hermes：26 + 15 项端到端检查）。
 

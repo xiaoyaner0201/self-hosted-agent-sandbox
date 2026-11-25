@@ -8,6 +8,13 @@
   and `execute()` returns `checkpoint`. `Sandbox.fork()`, `Sandbox.checkpoints()`,
   `sbx checkpoints [--prune]` and `sbx fork`. Files only; see [docs/checkpoint.md](docs/checkpoint.md).
   Off by default: results stay `{output, returncode}`. Pull-back never writes `.git/refs/sbx`.
+- Add a `docker` driver (`AGENT_SANDBOX_DRIVER=docker`, `AGENT_SANDBOX_DOCKER_IMAGE`) so
+  the same `Sandbox`/`sbx` path runs on a local Docker daemon for development and CI: non-root,
+  labelled, resource-limited `docker run -d --rm`, `docker exec`, `docker rm -f`, verified
+  release by `docker inspect` absence, idle backstop. Default runc is not a security boundary;
+  production stays on Kubernetes + gVisor. See [Docker driver](docs/docker-driver.md).
+- The kubectl lifecycle moved behind a thin driver seam unchanged (argv, manifests, error
+  texts). `Allocation` gains `driver` (default `"kubernetes"`; old ledgers load unchanged).
 
 ## 0.4.0
 
