@@ -30,7 +30,7 @@ This project keeps the agent where it is and sends **only the commands it execut
 - ⚡ **Warm pool.** A sandbox is claimed from a pre-started pool in about 0.2 s and deleted when the session ends. Pools are shared across nodes, each node keeps per-tenant package caches.
 - 🔑 **Credentials stay home.** No host variable is forwarded unless you name it. Git network commands run on the host; inside the sandbox they are stubs that exit 97 with a hint.
 - 🔁 **Two-way code sync with guard rails.** Pull-back into `.git` is an allowlist, so nothing built in the sandbox can plant a hook that the host later runs.
-- 🐍 **Small surface.** A pure-Python SDK (`Sandbox`) and a CLI (`sbx`), standard library only, `kubectl` as the only binary.
+- 🐍 **Small surface.** A pure-Python SDK (`Sandbox`) and a CLI (`sbx`), standard library only, `kubectl` as the only binary (or `docker` for the [local driver](docs/docker-driver.md)).
 - 🏗️ **Cluster recipes included.** Node install with a hard pod memory budget, gVisor, least-privilege RBAC and kubeconfig, per-tenant pools, cache GC.
 
 > [!IMPORTANT]
@@ -107,6 +107,8 @@ sb.close()  # legacy best-effort async delete, not a reclamation receipt
 ```
 
 For public allocation snapshots, constructor-failure recovery and opt-in bounded release with exact claim/Sandbox/Pod read-back, see [Lifecycle ownership](docs/lifecycle.md). `close()` and session-label `release()` retain their existing behavior.
+
+No cluster at hand? `AGENT_SANDBOX_DRIVER=docker AGENT_SANDBOX_DOCKER_IMAGE=<local image>` runs the same code path in a local Docker container for development and CI. Default runc is **not** a security boundary; production stays on Kubernetes + gVisor. See [Docker driver](docs/docker-driver.md).
 
 ## 🔌 Supported agents
 
@@ -208,6 +210,7 @@ Environment variables (adapters may also take them from their own config, e.g. H
 | `AGENT_SANDBOX_PERSISTENT` | `false` | reuse one claim per session label |
 | `AGENT_SANDBOX_CLAIM_TIMEOUT` | `180` | seconds to wait for a sandbox before giving up |
 | `AGENT_SANDBOX_CHECKPOINT` | `false` | record a git checkpoint (`refs/sbx/<session>/<seq>`) after each command and return its SHA as `checkpoint`. See [checkpoints](docs/checkpoint.md) |
+| `AGENT_SANDBOX_DRIVER` | `kubernetes` | `docker` = local container for development/CI, not a security boundary; `AGENT_SANDBOX_DOCKER_*` settings in [Docker driver](docs/docker-driver.md) |
 
 Code receipt now acknowledges its watermark only after payload checksum validation and local application. `sb.pull()` retries receipt without rerunning a command. Strict mode is opt-in; default command results remain best-effort. Build callers must explicitly copy named outputs from excluded `dist/build` into a non-excluded `out/` inside a code dir and verify their expected files/hashes. No dependency/build directory is enabled for whole-tree export. [Details and limits](docs/artifact-pull.md).
 
@@ -256,6 +259,7 @@ Each arrow starts at the side that opens the connection.
 - `tests/artifact_pull.py` uses real tar/binary transfers in a disposable **local Docker** container: truncation/corruption, failed ack, retry hashes, strict/default behavior and unchanged exclusions. No cluster; requires an already-local image and `sha256sum` in it. See [prerequisites](docs/artifact-pull.md#verification--验证入口).
 - `tests/lifecycle_unit.py` (31) exercises fake-kubectl lifecycle and real local POSIX process groups; `tests/artifact_integrity.py` (10) and `tests/integration_cross.py` (5) extend real Docker receipt/recovery coverage. Source and installed-wheel local gates were run; none substitutes for live-cluster acceptance.
 - `tests/checkpoint_unit.py` (10) checks checkpoints, fork, prune and the CLI offline against a real host git repository; `tests/checkpoint_docker.py` (1) checks a checkpoint after real Docker receipt, including a forged `refs/sbx` file being refused.
+- `tests/docker_unit.py` checks the docker driver offline with a fake `docker` (run flags, non-root, reuse, verified release, name reuse refused); `tests/e2e_docker.sh` runs the e2e checks below on a local Docker daemon with an already-local image.
 - `tests/e2e.sh` drives the `sbx` CLI against a real cluster: gVisor, variable forwarding, pull-back of files and commits, host routing, claim reuse and release, exit codes.
 - Adapter repos carry their own acceptance suites (for Hermes: 26 + 15 end-to-end checks).
 

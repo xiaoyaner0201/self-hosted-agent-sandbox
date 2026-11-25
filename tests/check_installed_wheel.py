@@ -43,7 +43,7 @@ print(json.dumps({'core': core.__file__, 'version': __version__}))
         for script in ('route_table.py', 'route_fuzz.py', 'core_unit.py',
                        'lifecycle_unit.py', 'artifact_pull.py',
                        'artifact_integrity.py', 'integration_cross.py',
-                       'checkpoint_unit.py', 'checkpoint_docker.py'):
+                       'checkpoint_unit.py', 'checkpoint_docker.py', 'docker_unit.py'):
             print(f'installed-wheel gate: {script}', flush=True)
             subprocess.run([python, str(root / 'tests' / script)], cwd=root,
                            env=env, check=True, timeout=600)

@@ -18,7 +18,9 @@ and verified release; there is no new server, worker, queue or implicit reaper.
 | `ReleaseError.allocation` | Latest retry target on an unverified result (delete rejection, timeout, observer denial, identity mismatch, invalid response, callback failure). Cancellation/KeyboardInterrupt remains its original type and also carries `.allocation`. |
 
 `Allocation` is an immutable named tuple with fields `namespace`, `claim`, `claim_uid`,
-`sandbox`, `sandbox_uid`, `pod`, `pod_uid`, `inventoried`. Store `target._asdict()` as JSON;
+`sandbox`, `sandbox_uid`, `pod`, `pod_uid`, `inventoried`, `driver` (`"kubernetes"` by default,
+so ledgers saved before the field existed restore unchanged; `"docker"` targets are described in
+[Docker driver](docker-driver.md)). Store `target._asdict()` as JSON;
 restore with `Allocation(**saved_dict)`. An early snapshot can be incomplete. Do not infer
 Pod identity merely from the constructor's Sandbox name: inventory reads the Sandbox CR,
 including its legacy `agents.x-k8s.io/pod-name` annotation (otherwise the Pod has the

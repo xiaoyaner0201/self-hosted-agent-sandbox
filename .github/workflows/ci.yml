@@ -33,6 +33,7 @@ jobs:
           python tests/core_unit.py
           python tests/lifecycle_unit.py
           python tests/checkpoint_unit.py
+          python tests/docker_unit.py
           python tests/artifact_pull.py
           python tests/artifact_integrity.py
           python tests/integration_cross.py
