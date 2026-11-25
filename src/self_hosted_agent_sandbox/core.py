@@ -1462,3 +1462,206 @@ class _KubernetesDriver:
         if failed:
             raise RuntimeError("agent-sandbox: release failed for " + "; ".join(failed))
         return len(names)
+
+
+def _docker_name(text: str) -> str:
+    return re.sub(r"[^a-z0-9_.-]+", "-", text.lower()).strip("-.") or "x"
+
+
+class _DockerDriver:
+    """Local Docker for development and CI: ``docker run -d`` one container per session,
+    ``docker exec``, ``docker rm -f``. The default runtime (runc) shares the host kernel and is
+    NOT a security boundary; production stays on kubernetes + gVisor.
+
+    No warm pool and no cluster reaper. Backstop for a dead host process: the container's main
+    process exits once the session has been idle for ``idle_ttl`` and ``--rm`` deletes it."""
+    name = "docker"
+    _ALIVE = "/tmp/.agent-sbx-alive"
+
+    def __init__(self, sb: "Sandbox", cc: dict):
+        self.sb = sb
+        self.bin = str(_cfg(cc, "agent_sandbox_docker", "AGENT_SANDBOX_DOCKER", "docker"))
+        self.image = str(_cfg(cc, "agent_sandbox_docker_image", "AGENT_SANDBOX_DOCKER_IMAGE", ""))
+        if not self.image:
+            raise ValueError("agent-sandbox: docker driver needs an image (AGENT_SANDBOX_DOCKER_IMAGE)")
+        self.runtime = str(_cfg(cc, "agent_sandbox_docker_runtime", "AGENT_SANDBOX_DOCKER_RUNTIME", ""))
+        self.memory = str(_cfg(cc, "agent_sandbox_docker_memory", "AGENT_SANDBOX_DOCKER_MEMORY", "4g"))
+        self.cpus = str(_cfg(cc, "agent_sandbox_docker_cpus", "AGENT_SANDBOX_DOCKER_CPUS", "2"))
+        self.pids = str(_cfg(cc, "agent_sandbox_docker_pids_limit", "AGENT_SANDBOX_DOCKER_PIDS_LIMIT", "4096"))
+        self.network = str(_cfg(cc, "agent_sandbox_docker_network", "AGENT_SANDBOX_DOCKER_NETWORK", ""))
+        self.user = str(_cfg(cc, "agent_sandbox_docker_user", "AGENT_SANDBOX_DOCKER_USER", "1000:1000"))
+        uid = self.user.split(":", 1)[0]
+        if not uid or uid == "root" or (uid.isdigit() and int(uid) == 0):
+            raise ValueError(f"agent-sandbox: docker driver runs commands as a non-root user, got {self.user!r}")
+        self.home = ""  # set when the image has no home for the user (HOME would be /)
+
+    def _run(self, *args: str, timeout: float = 60, inp: str | None = None) -> subprocess.CompletedProcess:
+        return subprocess.run([self.bin, *args], input=inp, capture_output=True, text=True, timeout=timeout)
+
+    def exec_argv(self, *argv: str, stdin: bool = False) -> list[str]:
+        env = ["--env", f"HOME={self.home}"] if self.home else []
+        return [self.bin, "exec", *(["-i"] if stdin else []), *env, self.sb._pod, *argv]
+
+    def _main_cmd(self) -> list[str]:
+        ttl = self.sb._idle_ttl
+        if ttl <= 0:
+            return ["sleep", "infinity"]
+        minutes = max(1, -(-ttl // 60))
+        a = self._ALIVE
+        return ["sh", "-c", f"touch {a}; while [ -e {a} ] && [ -z \"$(find {a} -mmin +{minutes})\" ]; "
+                            f"do sleep 20; done"]
+
+    def _find_existing(self) -> str | None:
+        r = self._run("ps", "--filter", f"label=agent-sandbox/session={self.sb._task_label}",
+                      "--filter", "label=agent-sandbox/driver=docker", "--filter", "status=running",
+                      "--format", "{{.Names}}")
+        names = r.stdout.split() if r.returncode == 0 else []
+        return names[0] if names else None
+
+    def _inspect(self, ref: str, timeout: float = 30):
+        """The container's inspect object, None when docker reports it absent; raises otherwise."""
+        r = self._run("container", "inspect", ref, timeout=timeout)
+        if r.returncode != 0:
+            if "no such container" in r.stderr.lower() or "no such object" in r.stderr.lower():
+                return None
+            raise RuntimeError(f"docker inspect failed: {r.stderr.strip()[:300]}")
+        objs = json.loads(r.stdout or "[]")
+        return objs[0] if objs else None
+
+    def acquire(self) -> None:
+        sb = self.sb
+        name = self._find_existing() if sb._persistent else None
+        if name is None:
+            name = _docker_name(f"{sb._app[:20]}-{sb._task_label[:30]}-{uuid.uuid4().hex[:6]}")
+            sb._observe_allocation(Allocation("", name, driver="docker"))  # before ambiguous run outcome
+            argv = ["run", "-d", "--rm", "--name", name,
+                    "--label", f"agent-sandbox/session={sb._task_label}",
+                    "--label", f"agent-sandbox/app={sb._app[:63]}", "--label", "agent-sandbox/driver=docker",
+                    "--user", self.user, "--memory", self.memory, "--cpus", self.cpus,
+                    "--pids-limit", self.pids, "--cap-drop", "ALL", "--security-opt", "no-new-privileges"]
+            if self.runtime:
+                argv += ["--runtime", self.runtime]
+            if self.network:
+                argv += ["--network", self.network]
+            r = self._run(*argv, "--entrypoint", self._main_cmd()[0], self.image, *self._main_cmd()[1:],
+                          timeout=sb._claim_timeout)
+            if r.returncode != 0:
+                with contextlib.suppress(Exception):  # a half-created container must not linger
+                    self._run("rm", "-f", name, timeout=30)
+                raise RuntimeError(f"agent-sandbox: docker run failed: {r.stderr.strip()[:300]}")
+        obj = self._inspect(name)
+        if obj is None or not obj.get("State", {}).get("Running"):
+            raise RuntimeError(f"agent-sandbox: container {name} is not running")
+        sb._observe_allocation(Allocation("", name, obj["Id"], name, obj["Id"], name, obj["Id"],
+                                          True, driver="docker"))
+        sb._claim, sb._pod = name, obj["Id"]
+        logger.info("agent-sandbox: docker container %s (%s)", name, obj["Id"][:12])
+
+    def prepare(self, dirs: list[str]) -> None:
+        """As root, once: create the mirrored absolute paths (only what is missing is created and
+        handed to the user) and a home when the image has none for the user."""
+        script = ('U=$1; shift; for d in "$@"; do p=$d; new=; while [ ! -e "$p" ]; do new="$p $new"; '
+                  'p=$(dirname "$p"); done; mkdir -p "$d"; [ -z "$new" ] || chown "$U" $new; done; '
+                  'n=${U%%:*}; h=$(awk -F: -v u="$n" \'$1==u||$3==u{print $6; exit}\' /etc/passwd); '
+                  'if [ -z "$h" ] || [ "$h" = / ]; then h=/home/agent; echo "$h"; fi; '
+                  '[ -d "$h" ] || { mkdir -p "$h"; chown "$U" "$h"; }')
+        r = subprocess.run([self.bin, "exec", "-u", "0", self.sb._pod, "sh", "-c", script, "prepare",
+                            self.user, *dirs], capture_output=True, text=True, timeout=60)
+        if r.returncode != 0:
+            raise RuntimeError(f"agent-sandbox: docker prepare failed rc={r.returncode}: {r.stderr.strip()[:300]}")
+        self.home = r.stdout.strip()
+
+    def renew(self) -> None:
+        sb = self.sb
+        if sb._idle_ttl <= 0 or sb._pod is None or time.monotonic() - sb._ttl_renewed < 55:
+            return
+        sb._ttl_renewed = time.monotonic()
+        try:
+            r = subprocess.run(self.exec_argv("touch", self._ALIVE), capture_output=True, text=True, timeout=20)
+            if r.returncode != 0:
+                logger.warning("agent-sandbox: ttl renew failed: %s", r.stderr.strip()[:200])
+        except Exception as e:
+            logger.warning("agent-sandbox: ttl renew failed: %s", e)
+
+    def remove(self) -> None:
+        r = self._run("rm", "-f", self.sb._pod or self.sb._claim)
+        logger.info("agent-sandbox: removed container %s rc=%s", self.sb._claim, r.returncode)
+
+    def release_config(self) -> dict:
+        return {"agent_sandbox_driver": "docker", "agent_sandbox_docker": self.bin}
+
+    @staticmethod
+    def _bare(cc: dict) -> "_DockerDriver":
+        d = _DockerDriver.__new__(_DockerDriver)
+        d.bin = str(_cfg(cc, "agent_sandbox_docker", "AGENT_SANDBOX_DOCKER", "docker"))
+        return d
+
+    @staticmethod
+    def release_allocation(allocation, *, config, timeout, poll_interval, on_allocation):
+        """Remove this exact container and verify ``docker inspect`` reports it absent."""
+        if not allocation.claim:
+            raise ValueError("allocation needs claim")
+        d = _DockerDriver._bare(config)
+        target = allocation
+        end = time.monotonic() + timeout
+
+        def remaining():
+            left = end - time.monotonic()
+            if left <= 0:
+                raise TimeoutError("verified release deadline exceeded")
+            return left
+
+        def get(ref):
+            obj = d._inspect(ref, timeout=remaining())
+            remaining()
+            if obj is None:
+                return None
+            labels = (obj.get("Config") or {}).get("Labels") or {}
+            if not obj.get("Id") or labels.get("agent-sandbox/driver", "docker") != "docker":
+                raise RuntimeError(f"invalid identity for container {ref}")
+            if target.claim_uid and obj["Id"] != target.claim_uid:
+                raise RuntimeError(f"UID changed for container {ref}; refusing name reuse")
+            return obj
+
+        try:
+            obj = get(target.claim_uid or target.claim)
+            if obj is None and target.claim_uid:
+                obj = get(target.claim)  # the id is gone; the name must not hide a live one
+                if obj is not None:
+                    raise RuntimeError("UID changed for container; refusing name reuse")
+            if obj is None:
+                return target  # never created, or already removed
+            if not target.claim_uid:
+                cid = obj["Id"]
+                target = target._replace(claim_uid=cid, sandbox=target.claim, sandbox_uid=cid,
+                                         pod=target.claim, pod_uid=cid, inventoried=True)
+            if on_allocation is not None:
+                on_allocation(target)  # persist the complete target before delete, every attempt
+            r = d._run("rm", "-f", target.claim_uid, timeout=remaining())
+            if r.returncode != 0:
+                raise RuntimeError(f"docker rm failed: {r.stderr.strip()[:300]}")
+            while get(target.claim_uid) is not None:
+                time.sleep(min(poll_interval, remaining()))
+            return target
+        except BaseException as error:
+            if not isinstance(error, Exception):
+                setattr(error, "allocation", target)
+                raise
+            raise ReleaseError(f"agent-sandbox: release not verified: {error}", target) from error
+
+    @staticmethod
+    def release_session(cc: dict, label: str) -> int:
+        d = _DockerDriver._bare(cc)
+        r = d._run("ps", "-a", "--filter", f"label=agent-sandbox/session={label}",
+                   "--filter", "label=agent-sandbox/driver=docker", "--format", "{{.Names}}")
+        if r.returncode != 0:
+            raise RuntimeError(f"agent-sandbox: list containers failed: {r.stderr.strip()[:300]}")
+        names = r.stdout.split()
+        failed = []
+        for n in names:
+            rm = d._run("rm", "-f", n)
+            if rm.returncode != 0:
+                failed.append(f"{n}: {rm.stderr.strip()[:200]}")
+        if failed:
+            raise RuntimeError("agent-sandbox: release failed for " + "; ".join(failed))
+        return len(names)

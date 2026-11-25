@@ -24,7 +24,7 @@ class DockerDriverTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        root = Path(self.tmp.name)
+        root = Path(os.path.realpath(self.tmp.name))  # host routing refuses symlinked cwd
         self.state = root / 'docker.json'
         (root / 'home').mkdir()
         self.code = root / 'code'
@@ -157,11 +157,11 @@ class DockerDriverTests(unittest.TestCase):
     # ---- lifecycle ----------------------------------------------------------
     def test_close_removes_container(self):
         sb = Sandbox(cwd=str(self.code), session='closeme', config=self.cfg)
-        name = sb._claim
+        name, cid = sb._claim, sb.allocation.claim_uid
         sb.close()
         self.assertIsNone(sb._claim)
         self.assertNotIn(name, self.data()['containers'])
-        self.assertIn(['rm', '-f', name], self.calls())
+        self.assertIn(['rm', '-f', cid], self.calls())  # by id: never a reused name
 
     def test_persistent_reuses_by_session_label_then_release(self):
         cfg = dict(self.cfg, agent_sandbox_persistent='true')

@@ -72,8 +72,8 @@ if a[0] == 'exec':
     rest = a[1:]
     root = False
     while rest and rest[0].startswith('-'):
-        if rest[0] == '-u':
-            root = rest[1] == '0'
+        if rest[0] in ('-u', '--user', '-e', '--env', '-w', '--workdir'):
+            root = root or (rest[0] in ('-u', '--user') and rest[1] == '0')
             rest = rest[2:]
         else:
             rest = rest[1:]
@@ -83,5 +83,6 @@ if a[0] == 'exec':
     if root:
         sys.exit(0)
     home = os.environ['FAKE_DOCKER_HOME']
-    sys.exit(subprocess.run(rest[1:], env=dict(os.environ, HOME=home)).returncode)
+    env = {'HOME': home, 'PATH': os.environ.get('PATH', '/usr/bin:/bin')}  # a container sees none of the host env
+    sys.exit(subprocess.run(rest[1:], env=env).returncode)
 fail('unexpected docker operation: ' + ' '.join(a))
