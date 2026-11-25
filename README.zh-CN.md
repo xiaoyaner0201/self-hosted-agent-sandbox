@@ -168,6 +168,12 @@ released = sb.release_verified(timeout=15)
 
 持久保存 `error.allocation` / `ReleaseError.allocation`，用 `Sandbox.release_allocation(target, config=original_config, timeout=15)` 恢复回收，并单独保留最初的执行异常。verified release 需要显式授予 Sandbox CR 观察权限，inventory 不完整时 fail-closed；验证精确 API 名称/UID 消失，**不证明物理进程死亡**。见[完整生命周期合同](docs/lifecycle.md)。
 
+## 检查点与分叉（需显式开启）
+
+设 `AGENT_SANDBOX_CHECKPOINT=true` 后，每次 `execute()` 的改动回拉到宿主机后，SDK 会把宿主机工作区记成一个 git 提交，挂在隐藏 ref `refs/sbx/<session>/<序号>` 上（父提交是上一个检查点，第一个的父提交是当时的 HEAD），并在返回值里加 `"checkpoint": "<sha>"`。你的 HEAD、分支和 index 不会被改。`sb.fork(sha, cwd=新目录, session=新会话)`（或 `sbx fork SHA DIR`）把这个状态检出成一个 detached worktree，并在那里起一个新沙箱；`sbx checkpoints --session X [--prune]` 列出或删除这些 ref。
+
+它**只恢复代码目录里的文件**：接口调用、数据库写入、推送都撤不回。`.gitignore` 掉的路径、从不同步的目录（`node_modules`、`build`、`dist` 等）以及仓库以外的东西都不在检查点里。见[检查点合同](docs/checkpoint.md)。
+
 ## 构建能力边界
 
 - 可运行沙箱镜像内已有的普通工具链；依赖、网络策略和资源额度由运维方配置。
@@ -201,6 +207,7 @@ released = sb.release_verified(timeout=15)
 | `AGENT_SANDBOX_IDLE_TTL` | `1800` | 集群侧到期时间（秒），有命令执行时自动续期 |
 | `AGENT_SANDBOX_PERSISTENT` | `false` | 同一会话标签复用同一个沙箱 |
 | `AGENT_SANDBOX_CLAIM_TIMEOUT` | `180` | 等沙箱就绪的最长秒数 |
+| `AGENT_SANDBOX_CHECKPOINT` | `false` | 每条命令后记一个 git 检查点（`refs/sbx/<session>/<序号>`），SHA 放进返回值的 `checkpoint`。见[检查点](docs/checkpoint.md) |
 
 回传游标现在只在载荷校验和本地应用成功后确认；`sb.pull()` 可以只重试接收、不重跑命令。严格模式显式开启，默认命令结果仍是 best-effort。构建调用方必须把指定制品从排除的 `dist/build` 复制到代码目录内未排除的 `out/`，并检查预期文件及 hash，不会默认放开构建/依赖全目录同步。详见[协议、兼容与限制](docs/artifact-pull.md)。
 
@@ -247,6 +254,7 @@ released = sb.release_verified(timeout=15)
 - `tests/route_table.py`（固定用例）和 `tests/route_fuzz.py`（随机生成命令交给真实 bash 执行，确认不会在代码目录外写文件）离线检查哪些命令回原机器执行：`python tests/route_table.py`。
 - `tests/core_unit.py` 用假的 `kubectl` 离线检查报错、流式输出、`release`、变量白名单（默认为空：主机上的 API key 不会进沙箱；去掉的变量会被 unset）和 git 配置白名单（主机和仓库两份）。
 - `tests/lifecycle_unit.py`（31）检查 fake kubectl 生命周期和真实本地 POSIX 进程组；`tests/artifact_pull.py`（11）、`tests/artifact_integrity.py`（10）、`tests/integration_cross.py`（5）使用真实 Docker 传输验证 ACK/恢复与交叉合同。源码和已安装 wheel 本地门禁已运行，不替代集群验收。
+- `tests/checkpoint_unit.py`（10）用真实宿主 git 仓库离线检查检查点、分叉、清理和命令行；`tests/checkpoint_docker.py`（1）在真实 Docker 回传后检查检查点，并确认沙箱伪造的 `refs/sbx` 文件不会落到宿主机。
 - `tests/e2e.sh` 用真实集群测 `sbx` 命令行：gVisor、变量同步、文件和 commit 回传、回原机器执行、沙箱复用和释放、退出码。
 - 各适配仓库有自己的验收（Hermes：26 + 15 项端到端检查）。
 

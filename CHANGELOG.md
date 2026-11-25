@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Add opt-in git checkpoints (`agent_sandbox_checkpoint` / `AGENT_SANDBOX_CHECKPOINT`):
+  after each command whose edits were received, the host work tree is recorded on
+  `refs/sbx/<session>/<seq>` with plumbing only (HEAD, branches, index untouched, no hooks)
+  and `execute()` returns `checkpoint`. `Sandbox.fork()`, `Sandbox.checkpoints()`,
+  `sbx checkpoints [--prune]` and `sbx fork`. Files only; see [docs/checkpoint.md](docs/checkpoint.md).
+  Off by default: results stay `{output, returncode}`. Pull-back never writes `.git/refs/sbx`.
+
 ## 0.4.0
 
 - Stable release of 0.4.0rc1 with no library code changes: published to PyPI
