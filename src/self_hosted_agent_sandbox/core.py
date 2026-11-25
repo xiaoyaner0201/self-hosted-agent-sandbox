@@ -396,6 +396,23 @@ def _mtime_key(p: str):
         return None
 
 
+def _checkpoint_module():
+    """checkpoint.py, also when this file is loaded on its own (tests import core.py by path)."""
+    try:
+        from . import checkpoint
+        return checkpoint
+    except ImportError:
+        import importlib.util
+        import sys
+        name = "self_hosted_agent_sandbox_checkpoint"
+        if name not in sys.modules:
+            spec = importlib.util.spec_from_file_location(name, os.path.join(os.path.dirname(__file__), "checkpoint.py"))
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            sys.modules[name] = mod
+        return sys.modules[name]
+
+
 class Sandbox:
     """One SandboxClaim per session; persistent mode reuses the claim by session label.
 
@@ -1123,7 +1140,7 @@ class Sandbox:
         command (None when it could not be recorded). Without it, ``result`` is unchanged."""
         if not getattr(self, "_checkpoint", False) or not isinstance(result, dict):
             return result
-        from . import checkpoint as _ckpt
+        _ckpt = _checkpoint_module()
         sha = None
         try:
             repo = _ckpt.find_repo(self._code_dirs)
@@ -1138,7 +1155,7 @@ class Sandbox:
 
     def checkpoints(self) -> list[dict]:
         """This session's checkpoints, oldest first: [{"seq", "sha", "ref", "parent"}]."""
-        from . import checkpoint as _ckpt
+        _ckpt = _checkpoint_module()
         repo = _ckpt.find_repo(self._code_dirs)
         return _ckpt.list_checkpoints(repo, self._task_label) if repo else []
 
@@ -1148,7 +1165,7 @@ class Sandbox:
         --detach``) and start a new Sandbox there for ``session``. Its code dir is ``cwd``; other
         settings are this sandbox's config updated with ``config``. Files only: effects outside
         the work tree (API calls, databases, pushes) are not undone."""
-        from . import checkpoint as _ckpt
+        _ckpt = _checkpoint_module()
         repo = _ckpt.find_repo(self._code_dirs)
         if repo is None:
             raise RuntimeError("agent-sandbox fork: no code dir is inside a git work tree")

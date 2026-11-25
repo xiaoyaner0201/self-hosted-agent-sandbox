@@ -36,9 +36,22 @@ def session_label(session: str) -> str:
     return s if s and _LABEL_RE.match(s) else "default"
 
 
+def _host_git_env() -> dict:
+    """Same hardening as host-side commands in core: ignore discovered bare repos, no ext::."""
+    env = dict(os.environ)
+    n = int(env.get("GIT_CONFIG_COUNT", "0") or 0)
+    for k, v in (("safe.bareRepository", "explicit"), ("protocol.ext.allow", "never")):
+        env[f"GIT_CONFIG_KEY_{n}"], env[f"GIT_CONFIG_VALUE_{n}"] = k, v
+        n += 1
+    env["GIT_CONFIG_COUNT"] = str(n)
+    env.pop("GIT_INDEX_FILE", None)
+    env.pop("GIT_DIR", None)
+    env.pop("GIT_WORK_TREE", None)
+    return env
+
+
 def _git(repo: str, *args: str, env: dict | None = None, inp: str | None = None,
          check: bool = True) -> subprocess.CompletedProcess:
-    from .core import _host_git_env  # safe.bareRepository=explicit, no ext:: transport
     e = _host_git_env()
     if env:
         e.update(env)
