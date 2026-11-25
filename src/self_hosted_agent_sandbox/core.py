@@ -335,6 +335,8 @@ def _git_protected(path: str, is_dir: bool = False) -> bool:
     rest = parts[i + 1:]
     if not rest:
         return not is_dir
+    if rest[:2] == ("refs", "sbx"):  # host-owned checkpoint refs: never forged or deleted
+        return True
     if rest[0] in _GIT_PULL_TOP and ".git" not in rest:
         return False
     return not (len(rest) == 1 and rest[0] in _GIT_PULL_FILES)
@@ -394,6 +396,23 @@ def _mtime_key(p: str):
         return None
 
 
+def _checkpoint_module():
+    """checkpoint.py, also when this file is loaded on its own (tests import core.py by path)."""
+    try:
+        from . import checkpoint
+        return checkpoint
+    except ImportError:
+        import importlib.util
+        import sys
+        name = "self_hosted_agent_sandbox_checkpoint"
+        if name not in sys.modules:
+            spec = importlib.util.spec_from_file_location(name, os.path.join(os.path.dirname(__file__), "checkpoint.py"))
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            sys.modules[name] = mod
+        return sys.modules[name]
+
+
 class Sandbox:
     """One SandboxClaim per session; persistent mode reuses the claim by session label.
 
@@ -443,6 +462,9 @@ class Sandbox:
             code_dirs = _task_dirs(start_cwd, self._task_files)
         self._auto_code_dirs = not _as_list(_cfg(cc, "agent_sandbox_code_dirs", "AGENT_SANDBOX_CODE_DIRS", ""))
         self._code_dirs = [os.path.abspath(d).rstrip("/") for d in code_dirs]
+        self._config = dict(cc)
+        self._checkpoint = str(_cfg(cc, "agent_sandbox_checkpoint", "AGENT_SANDBOX_CHECKPOINT",
+                                    False)).lower() in ("true", "1", "yes")
         self.cwd, self.timeout = start_cwd, timeout
         self._app = app
         self._seed_dirs = list(seed_dirs)
@@ -1087,8 +1109,8 @@ class Sandbox:
                     self._file_sync.sync(force=True)
                 if stream is not None:
                     stream.write((p.stdout + p.stderr).encode())  # binary stream, like the sandbox path
-                    return {"output": "", "returncode": p.returncode}
-                return {"output": p.stdout + p.stderr, "returncode": p.returncode}
+                    return self._with_checkpoint({"output": "", "returncode": p.returncode})
+                return self._with_checkpoint({"output": p.stdout + p.stderr, "returncode": p.returncode})
             try:
                 if run_in_sandbox is not None:
                     result = run_in_sandbox(command, cwd or self.cwd, timeout or self.timeout)
@@ -1109,7 +1131,50 @@ class Sandbox:
                 raise RuntimeError("agent-sandbox: code pull-back failed; command may have completed; "
                                    "retry pull-back before rerunning side effects") from e
             logger.warning("agent-sandbox: code pull-back failed: %s", e)
+            return result  # no checkpoint of a tree that missed the command's edits
+        return self._with_checkpoint(result)
+
+    # ---- opt-in git checkpoints (see checkpoint.py / docs/checkpoint.md) -----
+    def _with_checkpoint(self, result: dict) -> dict:
+        """With agent_sandbox_checkpoint, add "checkpoint": SHA of the host tree after the
+        command (None when it could not be recorded). Without it, ``result`` is unchanged."""
+        if not getattr(self, "_checkpoint", False) or not isinstance(result, dict):
+            return result
+        _ckpt = _checkpoint_module()
+        sha = None
+        try:
+            repo = _ckpt.find_repo(self._code_dirs)
+            if repo is None:
+                logger.warning("agent-sandbox: checkpoint skipped: no code dir is inside a git work tree")
+            else:
+                sha = _ckpt.create_checkpoint(repo, self._task_label, skip_dirs=_CODE_SKIP_DIRS)["sha"]
+        except Exception as e:  # the command already ran; report, never mask its result
+            logger.warning("agent-sandbox: checkpoint failed: %s", e)
+        result["checkpoint"] = sha
         return result
+
+    def checkpoints(self) -> list[dict]:
+        """This session's checkpoints, oldest first: [{"seq", "sha", "ref", "parent"}]."""
+        _ckpt = _checkpoint_module()
+        repo = _ckpt.find_repo(self._code_dirs)
+        return _ckpt.list_checkpoints(repo, self._task_label) if repo else []
+
+    def fork(self, checkpoint: str, cwd: str, *, session: str, config: dict | None = None,
+             **kwargs) -> "Sandbox":
+        """Check ``checkpoint`` out as a new detached worktree at ``cwd`` (``git worktree add
+        --detach``) and start a new Sandbox there for ``session``. Its code dir is ``cwd``; other
+        settings are this sandbox's config updated with ``config``. Files only: effects outside
+        the work tree (API calls, databases, pushes) are not undone."""
+        _ckpt = _checkpoint_module()
+        repo = _ckpt.find_repo(self._code_dirs)
+        if repo is None:
+            raise RuntimeError("agent-sandbox fork: no code dir is inside a git work tree")
+        dest = _ckpt.fork_worktree(repo, checkpoint, cwd)
+        cfg = dict(self._config, **(config or {}))
+        cfg["agent_sandbox_code_dirs"] = [dest]
+        kwargs.setdefault("app", self._app)
+        kwargs.setdefault("timeout", self.timeout)
+        return Sandbox(cwd=dest, session=session, config=cfg, **kwargs)
 
     def release_verified(self, *, timeout: float = 30, poll_interval: float = 0.2) -> Allocation:
         """Delete this exact allocation and verify claim, Sandbox and Pod absence.

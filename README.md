@@ -168,6 +168,12 @@ This is the success path, not a complete exception policy. On a receipt failure 
 
 Persist `error.allocation` / `ReleaseError.allocation` and recover with `Sandbox.release_allocation(target, config=original_config, timeout=15)`; preserve the original execution error separately. Verified release requires opt-in Sandbox CR observer permission, fails closed on missing inventory, and verifies exact API names/UIDs, **not physical process death**. See [full lifecycle contract](docs/lifecycle.md).
 
+## Checkpoints and forks (opt-in)
+
+With `AGENT_SANDBOX_CHECKPOINT=true`, every `execute()` whose edits were pulled back records the host work tree as a git commit on a hidden ref `refs/sbx/<session>/<seq>` (parent = previous checkpoint, the first one's parent = HEAD at that moment) and adds `"checkpoint": "<sha>"` to the result. Your HEAD, branches and index are not touched. `sb.fork(sha, cwd=new_dir, session=new)` (or `sbx fork SHA DIR`) checks that state out as a detached worktree and starts a new sandbox there; `sbx checkpoints --session X [--prune]` lists or deletes the refs.
+
+It restores **code-directory files only**: API calls, database writes and pushes are not undone. `.gitignore`d paths, the never-synced dirs (`node_modules`, `build`, `dist`, …) and anything outside the repository are not in a checkpoint. See [checkpoint contract](docs/checkpoint.md).
+
 ## Build capability boundary
 
 - Run ordinary toolchains already present in the sandbox image; dependencies, network policy and resource limits remain operator choices.
@@ -201,6 +207,7 @@ Environment variables (adapters may also take them from their own config, e.g. H
 | `AGENT_SANDBOX_IDLE_TTL` | `1800` | cluster-side expiry in seconds, renewed while active |
 | `AGENT_SANDBOX_PERSISTENT` | `false` | reuse one claim per session label |
 | `AGENT_SANDBOX_CLAIM_TIMEOUT` | `180` | seconds to wait for a sandbox before giving up |
+| `AGENT_SANDBOX_CHECKPOINT` | `false` | record a git checkpoint (`refs/sbx/<session>/<seq>`) after each command and return its SHA as `checkpoint`. See [checkpoints](docs/checkpoint.md) |
 
 Code receipt now acknowledges its watermark only after payload checksum validation and local application. `sb.pull()` retries receipt without rerunning a command. Strict mode is opt-in; default command results remain best-effort. Build callers must explicitly copy named outputs from excluded `dist/build` into a non-excluded `out/` inside a code dir and verify their expected files/hashes. No dependency/build directory is enabled for whole-tree export. [Details and limits](docs/artifact-pull.md).
 
@@ -248,6 +255,7 @@ Each arrow starts at the side that opens the connection.
 - `tests/core_unit.py` checks error handling, streaming output, `release`, the variable allowlist (empty by default: a host API key does not reach the sandbox; dropped names are unset) and the git config allowlists (host and repository) offline with a fake `kubectl`.
 - `tests/artifact_pull.py` uses real tar/binary transfers in a disposable **local Docker** container: truncation/corruption, failed ack, retry hashes, strict/default behavior and unchanged exclusions. No cluster; requires an already-local image and `sha256sum` in it. See [prerequisites](docs/artifact-pull.md#verification--验证入口).
 - `tests/lifecycle_unit.py` (31) exercises fake-kubectl lifecycle and real local POSIX process groups; `tests/artifact_integrity.py` (10) and `tests/integration_cross.py` (5) extend real Docker receipt/recovery coverage. Source and installed-wheel local gates were run; none substitutes for live-cluster acceptance.
+- `tests/checkpoint_unit.py` (10) checks checkpoints, fork, prune and the CLI offline against a real host git repository; `tests/checkpoint_docker.py` (1) checks a checkpoint after real Docker receipt, including a forged `refs/sbx` file being refused.
 - `tests/e2e.sh` drives the `sbx` CLI against a real cluster: gVisor, variable forwarding, pull-back of files and commits, host routing, claim reuse and release, exit codes.
 - Adapter repos carry their own acceptance suites (for Hermes: 26 + 15 end-to-end checks).
 

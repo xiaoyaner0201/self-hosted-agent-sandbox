@@ -19,7 +19,9 @@ def main():
 from self_hosted_agent_sandbox import Sandbox, Allocation, ReleaseError, __version__, core
 assert __version__ == '0.4.0'
 assert 'on_allocation' in inspect.signature(Sandbox).parameters
-assert all(hasattr(Sandbox, n) for n in ('pull', 'release_verified', 'release_allocation'))
+assert all(hasattr(Sandbox, n) for n in ('pull', 'release_verified', 'release_allocation',
+                                         'fork', 'checkpoints'))
+from self_hosted_agent_sandbox import checkpoint
 a = Allocation('namespace', 'claim')
 assert Allocation(**json.loads(json.dumps(a._asdict()))) == a
 assert ReleaseError('unverified', a).allocation == a
@@ -40,7 +42,8 @@ print(json.dumps({'core': core.__file__, 'version': __version__}))
         assert (root / 'src/self_hosted_agent_sandbox/core.py').resolve() == core
         for script in ('route_table.py', 'route_fuzz.py', 'core_unit.py',
                        'lifecycle_unit.py', 'artifact_pull.py',
-                       'artifact_integrity.py', 'integration_cross.py'):
+                       'artifact_integrity.py', 'integration_cross.py',
+                       'checkpoint_unit.py', 'checkpoint_docker.py'):
             print(f'installed-wheel gate: {script}', flush=True)
             subprocess.run([python, str(root / 'tests' / script)], cwd=root,
                            env=env, check=True, timeout=600)
