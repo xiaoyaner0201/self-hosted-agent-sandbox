@@ -44,6 +44,17 @@ t0=$(date +%s); sbx release --session never-claimed >/dev/null 2>&1; t1=$(date +
 ck release_unknown_is_quick '[ $((t1 - t0)) -lt 10 ]'
 sbx exec --session e2e7 -- 'exit 7' >/dev/null 2>&1; ck exit_code_propagates '[ $? = 7 ]'
 printf 'echo a\necho b\n' | sbx shell --session e2e8 > "$base/sh.out" 2>&1; ck shell_mode '[ "$(tr -d "\n" < "$base/sh.out")" = ab ]'
+# checkpoints (docs/checkpoint.md) are host-side and work unchanged on this driver
+out=$(AGENT_SANDBOX_CHECKPOINT=true python3 - <<'PY' 2>&1
+import os
+from self_hosted_agent_sandbox import Sandbox
+sb = Sandbox(cwd=os.getcwd(), session="e2e10", app="sbx-e2e")
+r = sb.execute("echo ck > ck.txt")
+print("checkpoint", bool(r.get("checkpoint")), len(sb.checkpoints()))
+sb.close()
+PY
+); echo "  | $out"
+ck checkpoint_on_docker '[[ "$out" == *"checkpoint True 1"* ]]'
 # SDK: verified release reads back docker inspect absence
 out=$(python3 - <<'PY' 2>&1
 import json, subprocess
