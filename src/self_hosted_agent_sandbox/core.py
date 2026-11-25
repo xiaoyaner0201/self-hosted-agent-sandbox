@@ -66,6 +66,9 @@ class Allocation(NamedTuple):
     pod: str = ""
     pod_uid: str = ""
     inventoried: bool = False
+    # Which driver owns the target. Ledgers written before drivers existed load as kubernetes.
+    # docker: claim = container name, claim_uid = container id, namespace = "".
+    driver: str = "kubernetes"
 
 
 class ReleaseError(RuntimeError):
@@ -137,6 +140,8 @@ _ENV_SKIP = frozenset({
     "PATH", "HOME", "HOSTNAME", "PWD", "OLDPWD", "SHLVL", "_", "TERM", "SHELL", "USER", "LOGNAME",
     "TMPDIR", "SSH_AUTH_SOCK", "SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY", "DISPLAY", "PS1",
     "KUBECONFIG", "AGENT_SANDBOX_KUBECONFIG", "AGENT_SANDBOX_KUBECTL",
+    "AGENT_SANDBOX_DOCKER", "DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG", "DOCKER_CERT_PATH",
+    "DOCKER_TLS_VERIFY",
     # Sized for the sandbox's own memory limit by its template, not the host's.
     "JAVA_TOOL_OPTIONS",
 })
@@ -426,6 +431,7 @@ class Sandbox:
                  config: dict | None = None, app: str = "agent-sandbox",
                  seed_dirs: tuple = (), extra_env_skip: tuple = (), on_allocation=None):
         cc = config or {}
+        self._driver = _make_driver(self, cc)  # validated before any claim is attempted
         self._kubectl = str(_cfg(cc, "agent_sandbox_kubectl", "AGENT_SANDBOX_KUBECTL", "kubectl"))
         self._kubeconfig = str(_cfg(cc, "agent_sandbox_kubeconfig", "AGENT_SANDBOX_KUBECONFIG",
                                     str(Path.home() / ".kube" / "agent-sandbox.yaml")))
@@ -484,6 +490,7 @@ class Sandbox:
 
     def _initialize(self) -> None:
         self._acquire()
+        self._drv.prepare(self._prepare_paths(self._code_dirs + self._sync_paths + [self.cwd]))
         self._remote_home = (self._exec_simple("printf %s \"$HOME\"") or "/root").strip() or "/root"
         self._exec_simple(f"mkdir -p {_STATE_DIR} && chmod 700 {_STATE_DIR} && : > {_ENV_FILE}; "
                           f"mkdir -p {shlex.quote(self.cwd)} 2>/dev/null || true")
@@ -497,6 +504,26 @@ class Sandbox:
         if self._code_dirs:  # reused claim: mark "now" so only later sandbox edits flow back
             self._exec_simple(f"touch {_MARK_FILE}")
 
+    # ---- driver seam: claim / exec / release (kubernetes or docker) -----------
+    @property
+    def _drv(self):
+        """The driver; instances built without __init__ (tests, adapters) are kubernetes."""
+        d = self.__dict__.get("_driver")
+        if d is None:
+            d = self.__dict__["_driver"] = _KubernetesDriver(self)
+        return d
+
+    @staticmethod
+    def _prepare_paths(paths) -> list[str]:
+        """Remote directories that must exist and be writable before files are pushed there."""
+        out = []
+        for p in paths:
+            p = os.path.abspath(p)
+            d = p if os.path.isdir(p) or not os.path.exists(p) else os.path.dirname(p)
+            if d != "/" and d not in out:
+                out.append(d)
+        return out
+
     # ---- kubectl plumbing -------------------------------------------------
     def _k(self, *args: str) -> list[str]:
         return [self._kubectl, "--kubeconfig", self._kubeconfig, "-n", self._ns, *args]
@@ -505,7 +532,7 @@ class Sandbox:
         return subprocess.run(self._k(*args), input=inp, capture_output=True, text=True, timeout=timeout)
 
     def _exec_argv(self, *argv: str, stdin: bool = False) -> list[str]:
-        return self._k("exec", *(["-i"] if stdin else []), self._pod, "-c", self._container, "--", *argv)
+        return self._drv.exec_argv(*argv, stdin=stdin)
 
     def _exec_simple(self, script: str, timeout: int = 60, inp: bytes | None = None) -> str:
         r = subprocess.run(self._exec_argv("bash", "-c", script, stdin=inp is not None),
@@ -542,51 +569,11 @@ class Sandbox:
         return lc
 
     def _renew_ttl(self) -> None:
-        """Push shutdownTime forward while the session is active (at most once a minute)."""
-        if self._idle_ttl <= 0 or self._claim is None or time.monotonic() - self._ttl_renewed < 55:
-            return
-        self._ttl_renewed = time.monotonic()
-        patch = json.dumps({"spec": {"lifecycle": self._lifecycle()}})
-        try:
-            r = self._run_k("patch", "sandboxclaim", self._claim, "--type", "merge", "-p", patch, timeout=20)
-            if r.returncode != 0:
-                logger.warning("agent-sandbox: ttl renew failed: %s", r.stderr.strip()[:200])
-        except Exception as e:
-            logger.warning("agent-sandbox: ttl renew failed: %s", e)
+        """Push the backstop expiry forward while the session is active (at most once a minute)."""
+        self._drv.renew()
 
     def _acquire(self) -> None:
-        name = self._find_existing_claim() if self._persistent else None
-        created = name is None
-        if name is None:
-            name = f"{self._app[:20]}-{self._task_label[:30]}-{uuid.uuid4().hex[:6]}"
-            manifest = {
-                "apiVersion": _CLAIM_API, "kind": "SandboxClaim",
-                "metadata": {"name": name, "labels": {"agent-sandbox/session": self._task_label, "agent-sandbox/app": self._app[:63]}},
-                "spec": {"warmPoolRef": {"name": self._pool}, "lifecycle": self._lifecycle()},
-            }
-            self._observe_allocation(Allocation(self._ns, name))  # before ambiguous apply outcome
-            r = self._run_k("apply", "-f", "-", inp=json.dumps(manifest))
-            if r.returncode != 0:
-                raise RuntimeError(f"agent-sandbox: claim create failed: {r.stderr.strip()[:300]}")
-        if self._allocation is None:
-            self._observe_allocation(Allocation(self._ns, name))
-        t0 = time.monotonic()
-        while time.monotonic() - t0 < self._claim_timeout:
-            r = self._run_k("get", "sandboxclaim", name, "-o", "json")
-            obj = json.loads(r.stdout or "{}") if r.returncode == 0 else {}
-            st = obj.get("status", {})
-            self._observe_allocation(self._allocation._replace(
-                claim_uid=obj.get("metadata", {}).get("uid", self._allocation.claim_uid),
-                sandbox=st.get("sandbox", {}).get("name", self._allocation.sandbox)))
-            if any(c.get("type") == "Ready" and c.get("status") == "True" for c in st.get("conditions", [])):
-                self._claim, self._pod = name, st["sandbox"]["name"]
-                self._ttl_renewed = time.monotonic()
-                logger.info("agent-sandbox: claim %s -> pod %s in %.2fs", name, self._pod, time.monotonic() - t0)
-                return
-            time.sleep(0.25)
-        if created:  # don't leave a pending claim queued behind a failed session start
-            self._run_k("delete", "sandboxclaim", name, "--wait=false")
-        raise RuntimeError(f"agent-sandbox: claim {name} not Ready within {self._claim_timeout}s")
+        self._drv.acquire()
 
     # ---- tar transport ------------------------------------------------------
     def _tar_push(self, pairs: list[tuple[str, str]]) -> None:
@@ -854,7 +841,7 @@ class Sandbox:
         return f"[ -r {_ENV_FILE} ] && . {_ENV_FILE} >/dev/null 2>&1\n"
 
     def exec_argv(self, *argv: str, stdin: bool = False) -> list[str]:
-        """kubectl argv that runs ``argv`` in the sandbox container."""
+        """kubectl (or docker) argv that runs ``argv`` in the sandbox container."""
         return self._exec_argv(*argv, stdin=stdin)
 
     def _default_run(self, command: str, cwd: str, timeout: int, stream=None) -> dict:
@@ -1072,6 +1059,7 @@ class Sandbox:
         if self._pull_pending:
             self._pull_code()  # adoption must not reset the mark past an unreceived delta
         self._code_dirs.extend(new)
+        self._drv.prepare(self._prepare_paths(new))
         self._reset_remote_dirs(new)
         self._exec_simple(f"touch {_MARK_FILE}")
         if self._file_sync is None:
@@ -1200,8 +1188,7 @@ class Sandbox:
             try:
                 target = type(self).release_allocation(
                     self._allocation,
-                    config={"agent_sandbox_kubectl": self._kubectl,
-                            "agent_sandbox_kubeconfig": self._kubeconfig},
+                    config=self._drv.release_config(),
                     timeout=left, poll_interval=poll_interval,
                     on_allocation=self._observe_allocation)
             except ReleaseError as error:
@@ -1227,6 +1214,130 @@ class Sandbox:
             raise ValueError("timeout must be finite and positive")
         if not math.isfinite(poll_interval) or poll_interval <= 0:
             raise ValueError("poll_interval must be finite and positive")
+        if allocation.driver == "docker":
+            return _DockerDriver.release_allocation(allocation, config=config or {}, timeout=timeout,
+                                                    poll_interval=poll_interval, on_allocation=on_allocation)
+        if allocation.driver != "kubernetes":
+            raise ValueError(f"unknown sandbox driver {allocation.driver!r}")
+        return _KubernetesDriver.release_allocation(cls, allocation, config=config, timeout=timeout,
+                                                    poll_interval=poll_interval, on_allocation=on_allocation)
+
+    @classmethod
+    def release(cls, session: str, *, config: dict | None = None) -> int:
+        """Delete every claim kept for ``session`` (persistent mode) without claiming a new one.
+        Returns how many delete requests were accepted, not confirmed reclamations."""
+        cc = config or {}
+        label = "".join(ch if ch.isalnum() else "-" for ch in str(session).lower())[:50].strip("-") or "default"
+        if _driver_name(cc) == "docker":
+            return _DockerDriver.release_session(cc, label)
+        return _KubernetesDriver.release_session(cls, cc, label)
+
+    def close(self, *, force_remove: bool = False):
+        """Final pull-back, then delete the claim (kept when persistent unless ``force_remove``)."""
+        with self._lock:
+            if self._claim is None:
+                return
+            try:
+                self._pull_code()
+            except Exception as e:
+                if self._strict_pull:
+                    raise  # keep the claim available for a retry, subject to its idle TTL
+                logger.warning("agent-sandbox: final pull-back failed: %s", e)
+            if force_remove or not self._persistent:
+                self._drv.remove()
+            self._claim = None
+
+
+# ---- drivers ---------------------------------------------------------------------------------
+# A driver owns only claim / exec argv / renew / remove / verified release. Everything above it
+# (host-command routing, env allowlist, two-way code sync, .git allowlist, strict-pull receipt)
+# is the same Sandbox code for every driver.
+
+def _driver_name(cc: dict) -> str:
+    name = str(_cfg(cc, "agent_sandbox_driver", "AGENT_SANDBOX_DRIVER", "kubernetes")).strip().lower()
+    if name not in ("kubernetes", "docker"):
+        raise ValueError(f"agent-sandbox: unknown sandbox driver {name!r} (kubernetes or docker)")
+    return name
+
+
+def _make_driver(sb: "Sandbox", cc: dict):
+    return _DockerDriver(sb, cc) if _driver_name(cc) == "docker" else _KubernetesDriver(sb)
+
+
+class _KubernetesDriver:
+    """kubernetes-sigs/agent-sandbox: SandboxClaim from a warm pool, ``kubectl exec``. The
+    kubectl plumbing (``Sandbox._k``/``_run_k``) and the claim manifest stay as they were."""
+    name = "kubernetes"
+
+    def __init__(self, sb: "Sandbox"):
+        self.sb = sb
+
+    def exec_argv(self, *argv: str, stdin: bool = False) -> list[str]:
+        sb = self.sb
+        return sb._k("exec", *(["-i"] if stdin else []), sb._pod, "-c", sb._container, "--", *argv)
+
+    def prepare(self, dirs: list[str]) -> None:
+        """The pool template provides writable workspaces; nothing to do."""
+
+    def renew(self) -> None:
+        """Push shutdownTime forward while the session is active (at most once a minute)."""
+        sb = self.sb
+        if sb._idle_ttl <= 0 or sb._claim is None or time.monotonic() - sb._ttl_renewed < 55:
+            return
+        sb._ttl_renewed = time.monotonic()
+        patch = json.dumps({"spec": {"lifecycle": sb._lifecycle()}})
+        try:
+            r = sb._run_k("patch", "sandboxclaim", sb._claim, "--type", "merge", "-p", patch, timeout=20)
+            if r.returncode != 0:
+                logger.warning("agent-sandbox: ttl renew failed: %s", r.stderr.strip()[:200])
+        except Exception as e:
+            logger.warning("agent-sandbox: ttl renew failed: %s", e)
+
+    def acquire(self) -> None:
+        sb = self.sb
+        name = sb._find_existing_claim() if sb._persistent else None
+        created = name is None
+        if name is None:
+            name = f"{sb._app[:20]}-{sb._task_label[:30]}-{uuid.uuid4().hex[:6]}"
+            manifest = {
+                "apiVersion": _CLAIM_API, "kind": "SandboxClaim",
+                "metadata": {"name": name, "labels": {"agent-sandbox/session": sb._task_label, "agent-sandbox/app": sb._app[:63]}},
+                "spec": {"warmPoolRef": {"name": sb._pool}, "lifecycle": sb._lifecycle()},
+            }
+            sb._observe_allocation(Allocation(sb._ns, name))  # before ambiguous apply outcome
+            r = sb._run_k("apply", "-f", "-", inp=json.dumps(manifest))
+            if r.returncode != 0:
+                raise RuntimeError(f"agent-sandbox: claim create failed: {r.stderr.strip()[:300]}")
+        if sb._allocation is None:
+            sb._observe_allocation(Allocation(sb._ns, name))
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < sb._claim_timeout:
+            r = sb._run_k("get", "sandboxclaim", name, "-o", "json")
+            obj = json.loads(r.stdout or "{}") if r.returncode == 0 else {}
+            st = obj.get("status", {})
+            sb._observe_allocation(sb._allocation._replace(
+                claim_uid=obj.get("metadata", {}).get("uid", sb._allocation.claim_uid),
+                sandbox=st.get("sandbox", {}).get("name", sb._allocation.sandbox)))
+            if any(c.get("type") == "Ready" and c.get("status") == "True" for c in st.get("conditions", [])):
+                sb._claim, sb._pod = name, st["sandbox"]["name"]
+                sb._ttl_renewed = time.monotonic()
+                logger.info("agent-sandbox: claim %s -> pod %s in %.2fs", name, sb._pod, time.monotonic() - t0)
+                return
+            time.sleep(0.25)
+        if created:  # don't leave a pending claim queued behind a failed session start
+            sb._run_k("delete", "sandboxclaim", name, "--wait=false")
+        raise RuntimeError(f"agent-sandbox: claim {name} not Ready within {sb._claim_timeout}s")
+
+    def remove(self) -> None:
+        sb = self.sb
+        r = sb._run_k("delete", "sandboxclaim", sb._claim, "--wait=false")
+        logger.info("agent-sandbox: deleted claim %s rc=%s", sb._claim, r.returncode)
+
+    def release_config(self) -> dict:
+        return {"agent_sandbox_kubectl": self.sb._kubectl, "agent_sandbox_kubeconfig": self.sb._kubeconfig}
+
+    @staticmethod
+    def release_allocation(cls, allocation, *, config, timeout, poll_interval, on_allocation):
         if not allocation.namespace or not allocation.claim:
             raise ValueError("allocation needs namespace and claim")
         sb = cls.__new__(cls)
@@ -1332,17 +1443,13 @@ class Sandbox:
                 raise  # do not replace caller cancellation/KeyboardInterrupt
             raise ReleaseError(f"agent-sandbox: release not verified: {error}", target) from error
 
-    @classmethod
-    def release(cls, session: str, *, config: dict | None = None) -> int:
-        """Delete every claim kept for ``session`` (persistent mode) without claiming a new one.
-        Returns how many delete requests were accepted, not confirmed reclamations."""
+    @staticmethod
+    def release_session(cls, cc: dict, label: str) -> int:
         sb = cls.__new__(cls)
-        cc = config or {}
         sb._kubectl = str(_cfg(cc, "agent_sandbox_kubectl", "AGENT_SANDBOX_KUBECTL", "kubectl"))
         sb._kubeconfig = str(_cfg(cc, "agent_sandbox_kubeconfig", "AGENT_SANDBOX_KUBECONFIG",
                                   str(Path.home() / ".kube" / "agent-sandbox.yaml")))
         sb._ns = str(_cfg(cc, "agent_sandbox_namespace", "AGENT_SANDBOX_NAMESPACE", "sbx"))
-        label = "".join(ch if ch.isalnum() else "-" for ch in str(session).lower())[:50].strip("-") or "default"
         r = sb._run_k("get", "sandboxclaims", "-l", f"agent-sandbox/session={label}", "-o", "json")
         if r.returncode != 0:
             raise RuntimeError(f"agent-sandbox: list claims failed: {r.stderr.strip()[:300]}")
@@ -1355,19 +1462,3 @@ class Sandbox:
         if failed:
             raise RuntimeError("agent-sandbox: release failed for " + "; ".join(failed))
         return len(names)
-
-    def close(self, *, force_remove: bool = False):
-        """Final pull-back, then delete the claim (kept when persistent unless ``force_remove``)."""
-        with self._lock:
-            if self._claim is None:
-                return
-            try:
-                self._pull_code()
-            except Exception as e:
-                if self._strict_pull:
-                    raise  # keep the claim available for a retry, subject to its idle TTL
-                logger.warning("agent-sandbox: final pull-back failed: %s", e)
-            if force_remove or not self._persistent:
-                r = self._run_k("delete", "sandboxclaim", self._claim, "--wait=false")
-                logger.info("agent-sandbox: deleted claim %s rc=%s", self._claim, r.returncode)
-            self._claim = None
